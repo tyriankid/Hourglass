@@ -229,7 +229,7 @@ export class SandSim {
     const u32r = (name: string, kind: 'read' | 'rw' = 'read'): BindSpec => ({ name, kind, type: 'array<u32>' });
     const parts = (body: string, extra = '') => ({ types: typesSrc, fns: fnsSrc + '\n' + extra, body });
     const K = this.kernels;
-    K.predict = makeKernel(d, 'predict', parts(predictSrc), [U, P, v4('pos', 'rw'), v4('vel', 'rw'), v4('predOut', 'rw'), atom('pend'), v4('rest', 'rw')]);
+    K.predict = makeKernel(d, 'predict', parts(predictSrc), [U, P, v4('pos', 'rw'), v4('vel', 'read'), v4('predOut', 'rw'), atom('pend'), v4('rest', 'rw')]);
     K.gridClear = makeKernel(d, 'gridClear', parts(gridClearSrc), [U, P, atom('grid')]);
     K.gridInsert = makeKernel(d, 'gridInsert', parts(gridInsertSrc), [U, P, v4('pred', 'read'), atom('grid'), atom('ctl')]);
     K.sink = makeKernel(d, 'sink', parts(sinkSrc), [U, P, v4('pos', 'rw'), v4('pred', 'rw'), atom('ctl'), u32r('freeStack', 'rw')]);
