@@ -56,6 +56,11 @@ export class App {
   private prev = performance.now();
   private inFlight = 0;
   private lastStats: FrameStats | null = null;
+  /** 帧时间的指数平均（ms），用于自适应分辨率和性能面板 */
+  frameMs = 16.7;
+  substepsUsed = 8;
+  private scaleTimer = 0;
+  autoScale = true;
   onFrame: ((app: App, s: FrameStats | null) => void) | null = null;
 
   constructor(private device: GPUDevice, canvas: HTMLCanvasElement, readonly rc: number, readonly settings: Settings) {
@@ -100,11 +105,11 @@ export class App {
         break;
       case 'running':
         this.state = 'laying';
-        this.motion.layDown(() => (this.state = 'paused'));
+        this.motion.layDown(() => this.transition('laying', 'paused'));
         break;
       case 'paused':
         this.state = 'rising';
-        this.motion.rise(this.uprightAngle, () => (this.state = 'running'));
+        this.motion.rise(this.uprightAngle, () => this.transition('rising', 'running'));
         break;
       case 'finished':
         this.state = 'idle';
@@ -119,11 +124,16 @@ export class App {
     this.flipQueued = false;
     this.state = 'flipping';
     this.uprightAngle = Math.round((this.motion.angle + Math.PI) / Math.PI) * Math.PI;
-    this.motion.flip(() => (this.state = 'running'));
+    this.motion.flip(() => this.transition('flipping', 'running'));
+  }
+
+  /** 动画结束时的状态切换：只有当前状态仍是预期的那个才切（期间可能被重置打断） */
+  private transition(from: State, to: State) {
+    if (this.state === from) this.state = to;
   }
 
   private reset() {
-    if (this.state === 'idle' || this.busy) return;
+    if (this.state === 'idle' || this.state === 'flipping' || this.state === 'finished' || this.busy) return;
     const wasLaid = this.state === 'paused' || this.state === 'laying';
     const finishReset = () => {
       const up = this.motion.localUp();
@@ -344,6 +354,8 @@ export class App {
     }
     const dt = Math.min(wallDt, 0.05);
     this.time += dt;
+    if (wallDt > 0 && wallDt < 0.5) this.frameMs += (wallDt * 1000 - this.frameMs) * 0.05;
+    this.adaptScale(dt);
     this.ui.update(dt);
     this.input.update(dt);
     this.motion.update(dt);
@@ -351,6 +363,7 @@ export class App {
     const byStability = Math.ceil(dt / 0.0021);
     const byMotion = Math.ceil((this.maxSpeed * dt) / (0.5 * this.rc));
     const substeps = Math.max(4, Math.min(16, Math.max(byStability, byMotion)));
+    this.substepsUsed = substeps;
 
     const enc = this.device.createCommandEncoder();
     if (this.state === 'idle') {
@@ -378,6 +391,21 @@ export class App {
     this.updateUi();
     this.audio.update(this.lastStats, dt);
     this.onFrame?.(this, this.lastStats);
+  }
+
+  /** 持续掉帧时降低内部渲染分辨率，余量充足时升回去 */
+  private adaptScale(dt: number) {
+    if (!this.autoScale) return;
+    this.scaleTimer += dt;
+    if (this.scaleTimer < 1.5) return;
+    const r = this.renderer;
+    if (this.frameMs > 21 && r.renderScale > 0.5) {
+      r.renderScale = Math.max(0.5, r.renderScale - 0.1);
+      this.scaleTimer = 0;
+    } else if (this.frameMs < 14 && r.renderScale < 1) {
+      r.renderScale = Math.min(1, r.renderScale + 0.05);
+      this.scaleTimer = 0;
+    }
   }
 
   private updateUi() {

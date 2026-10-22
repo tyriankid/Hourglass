@@ -28,15 +28,25 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> GOut 
   let rg = V.sim.z;
   // 至少一个像素宽，透明度按真实投影面积换算（方形四边形面积 4r² 对应圆面积 πrg²）
   let r = max(rg, pixel * 0.75);
-  o.pos = V.proj * vec4f(cv + vec3f(CORNERS[vi] * r, 0.0), 1.0);
-  o.uv = CORNERS[vi];
-  let cover = clamp(0.785 * (rg * rg) / (r * r), 0.02, 1.0);
+  // 运动模糊：沿速度方向拉成快门时间（1/90 s）内走过的线段，能量按面积守恒
+  let vv = (V.view * V.model * vec4f(gvel[ii].xyz, 0.0)).xyz;
+  let streak = vv.xy * (1.0 / 90.0);
+  let sl = length(streak);
+  var axis = vec2f(0.0, 1.0);
+  if (sl > 1e-7) { axis = streak / sl; }
+  let side = vec2f(-axis.y, axis.x);
+  let c = CORNERS[vi];
+  // c.y = -1 端在当前位置，+1 端在快门开始时的位置
+  let off = side * c.x * r + axis * (c.y * r - (c.y * 0.5 + 0.5) * sl);
+  o.pos = V.proj * vec4f(cv + vec3f(off, 0.0), 1.0);
+  o.uv = c;
+  let cover = clamp(0.785 * (rg * rg) / (r * r) * (2.0 * r) / (2.0 * r + sl), 0.004, 1.0);
   let h = pcg(ii * 747796405u + u32(V.misc.y) / 3u);
   var tone = vec3f(0.68, 0.52, 0.31);
   let r0 = u01(pcg(ii + 11u));
   if (r0 < 0.07) { tone = vec3f(0.20, 0.15, 0.10); } else if (r0 < 0.19) { tone = vec3f(0.80, 0.78, 0.72); }
-  var col = tone * (0.55 + 0.5 * V.light.w);
-  if (u01(h) < 0.03) { col += vec3f(4.0, 3.9, 3.6); }
+  var col = tone * (0.35 + 0.35 * V.light.w);
+  if (u01(h) < 0.03) { col += vec3f(3.0, 2.9, 2.7); }
   o.col = vec4f(col * cover, cover);
   return o;
 }

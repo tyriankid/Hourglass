@@ -268,7 +268,7 @@ export class Renderer {
     });
     t.bg.grains = d.createBindGroup({
       layout: P.grains.getBindGroupLayout(0),
-      entries: [ub[0], { binding: 2, resource: { buffer: B.grains } }],
+      entries: [ub[0], { binding: 2, resource: { buffer: B.grains } }, { binding: 3, resource: { buffer: B.gvel } }],
     });
     t.bg.fx = d.createBindGroup({
       layout: P.fx.getBindGroupLayout(0),
@@ -331,6 +331,10 @@ export class Renderer {
     const aby = b[1] - a[1];
     const t = Math.max(0, Math.min(1, ((x - a[0]) * abx + (y - a[1]) * aby) / (abx * abx + aby * aby || 1)));
     return Math.hypot(x - (a[0] + abx * t), y - (a[1] + aby * t)) < r;
+  }
+
+  size(): string {
+    return this.t ? `${this.t.w}×${this.t.h}` : '-';
   }
 
   /** 相机的世界位置 */

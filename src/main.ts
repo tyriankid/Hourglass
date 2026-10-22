@@ -379,6 +379,26 @@ async function runDrainTest(device: GPUDevice, rc: number, minutes: number) {
   (window as any).__result = result;
 }
 
+/** 性能面板（?hud=1）：真机测试时截图发回来就能判断瓶颈 */
+function attachHud(app: App, device: GPUDevice) {
+  const el = document.createElement('pre');
+  el.style.cssText =
+    'position:fixed;left:8px;top:8px;margin:0;padding:6px 8px;background:rgba(255,255,255,.7);font:11px/1.4 ui-monospace,monospace;color:#333;border-radius:6px;pointer-events:none;z-index:9';
+  document.body.appendChild(el);
+  let gpu = '';
+  const info = (device as any).adapterInfo ?? null;
+  if (info) gpu = [info.vendor, info.architecture, info.description].filter(Boolean).join(' ');
+  app.onFrame = (a, s) => {
+    el.textContent = [
+      `${(1000 / a.frameMs).toFixed(0)} fps  ${a.frameMs.toFixed(1)} ms  子步 ${a.substepsUsed}`,
+      `分辨率 ×${a.renderer.renderScale.toFixed(2)}  ${a.renderer.size()}`,
+      `颗粒团 ${s?.clumpsAlive ?? '-'} / ${a.sim.p.clumpCap}  r=${(a.rc * 1000).toFixed(2)}mm`,
+      `状态 ${a.state}  上泡 ${(s?.massPos ?? 0).toFixed(0)} mg  下泡 ${(s?.massNeg ?? 0).toFixed(0)} mg`,
+      gpu ? `GPU ${gpu}` : '',
+    ].join('\n');
+  };
+}
+
 /** 无头测试：按固定步长驱动完整流程，在各阶段请求截图（与 tools/run.mjs 握手） */
 async function runAppScenario(app: App) {
   const w = window as any;
@@ -555,7 +575,11 @@ async function main() {
     const appRc = params.get('rc') ? rc : tierRc[q] / 1000;
     const app = new App(device, document.getElementById('view') as HTMLCanvasElement, appRc, settings);
     (window as any).__app = app;
-    if (params.get('scale')) app.renderer.renderScale = Number(params.get('scale'));
+    if (params.get('scale')) {
+      app.renderer.renderScale = Number(params.get('scale'));
+      app.autoScale = false;
+    }
+    if (params.get('hud') === '1') attachHud(app, device);
     if (params.get('test') === '1') await runAppScenario(app);
     else app.start();
   }
