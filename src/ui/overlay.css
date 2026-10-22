@@ -1,0 +1,197 @@
+:root {
+  --ink: rgba(52, 50, 47, 0.78);
+  --ink-soft: rgba(52, 50, 47, 0.42);
+  --panel: rgba(250, 249, 247, 0.82);
+  --font: -apple-system, 'SF Pro Display', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', system-ui, sans-serif;
+}
+
+.hg-ui {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  font-family: var(--font);
+  color: var(--ink);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.hg-bottom {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: max(3.5vh, env(safe-area-inset-bottom));
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+.hg-time {
+  font-weight: 200;
+  font-size: clamp(34px, 6.2vh, 56px);
+  letter-spacing: 0.06em;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.hg-hint {
+  font-size: 13px;
+  font-weight: 300;
+  letter-spacing: 0.12em;
+  color: var(--ink-soft);
+  min-height: 1.2em;
+  transition: opacity 0.8s ease;
+}
+
+.hg-ruler {
+  width: min(560px, 86vw);
+  height: 54px;
+  pointer-events: auto;
+  touch-action: none;
+  cursor: grab;
+  transition: opacity 0.6s ease, transform 0.6s ease;
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 22%, #000 78%, transparent);
+  mask-image: linear-gradient(90deg, transparent, #000 22%, #000 78%, transparent);
+}
+
+.hg-ruler.hidden {
+  opacity: 0;
+  transform: translateY(12px);
+  pointer-events: none;
+}
+
+.hg-top {
+  position: absolute;
+  top: max(14px, env(safe-area-inset-top));
+  right: max(14px, env(safe-area-inset-right));
+  display: flex;
+  gap: 6px;
+  transition: opacity 0.8s ease;
+}
+
+.hg-btn {
+  pointer-events: auto;
+  width: 40px;
+  height: 40px;
+  border: none;
+  border-radius: 20px;
+  background: transparent;
+  color: var(--ink-soft);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+}
+
+.hg-btn:hover {
+  background: rgba(0, 0, 0, 0.05);
+  color: var(--ink);
+}
+
+.hg-btn svg {
+  width: 20px;
+  height: 20px;
+}
+
+.hg-btn.hidden {
+  display: none;
+}
+
+.hg-fade {
+  opacity: 0;
+}
+
+.hg-panel {
+  position: absolute;
+  top: max(62px, calc(env(safe-area-inset-top) + 48px));
+  right: max(14px, env(safe-area-inset-right));
+  width: min(300px, calc(100vw - 28px));
+  padding: 18px 18px 10px;
+  border-radius: 18px;
+  background: var(--panel);
+  backdrop-filter: blur(18px) saturate(1.2);
+  -webkit-backdrop-filter: blur(18px) saturate(1.2);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.08);
+  pointer-events: auto;
+  font-size: 14px;
+  font-weight: 300;
+  transition: opacity 0.3s ease, transform 0.3s ease;
+}
+
+.hg-panel.hidden {
+  opacity: 0;
+  transform: translateY(-8px);
+  pointer-events: none;
+}
+
+.hg-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.hg-row label {
+  white-space: nowrap;
+}
+
+.hg-row input[type='range'] {
+  width: 130px;
+  accent-color: #8a7a62;
+}
+
+.hg-row select {
+  font: inherit;
+  border: none;
+  background: rgba(0, 0, 0, 0.05);
+  border-radius: 8px;
+  padding: 4px 8px;
+  color: var(--ink);
+}
+
+.hg-switch {
+  position: relative;
+  width: 40px;
+  height: 24px;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.12);
+  cursor: pointer;
+  transition: background 0.2s;
+  flex: none;
+}
+
+.hg-switch::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 9px;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  transition: transform 0.2s;
+}
+
+.hg-switch.on {
+  background: #a8957a;
+}
+
+.hg-switch.on::after {
+  transform: translateX(16px);
+}
+
+.hg-veil {
+  position: fixed;
+  inset: 0;
+  background: #e6e3de;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.6s ease;
+}
+
+.hg-veil.on {
+  opacity: 1;
+  transition: opacity 0.15s ease;
+}

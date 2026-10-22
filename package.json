@@ -1,0 +1,20 @@
+{
+  "name": "hourglass",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --host",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@webgpu/types": "^0.1.74",
+    "playwright": "^1.64.1",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.5",
+    "vitest": "^5.0.5"
+  }
+}
