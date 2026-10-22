@@ -57,7 +57,7 @@ if (/test=1/.test(query)) {
   console.log('RESULT', JSON.stringify(await page.evaluate(() => window.__result)));
   await page.waitForTimeout(500);
   if (shot) await page.screenshot({ path: shot });
-} else if (/mode=(drain|compile|bench|inspect)/.test(query)) {
+} else if (/mode=(drain|compile|bench|inspect|stream)/.test(query)) {
   await page.waitForFunction(() => window.__result, null, { timeout: 0, polling: 2000 });
   console.log('RESULT', JSON.stringify(await page.evaluate(() => window.__result), null, 2));
 } else {

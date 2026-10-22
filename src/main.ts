@@ -512,6 +512,38 @@ async function main() {
     (window as any).__result = { ok: true };
     return;
   }
+  if (mode === 'stream') {
+    // 沙流统计：在飞沙粒的数量、高度分布、横向散布
+    const sim = new SandSim(device, defaultParams(rc, sandMassForSeconds(3600)));
+    sim.seed(seedBulb(rc, sandMassForSeconds(minutes * 60), 1, 1, 5));
+    let emitted = 0;
+    sim.onStats = (s) => (emitted += s.emitted);
+    for (let f = 0; f < 150; f++) {
+      const enc = device.createCommandEncoder();
+      sim.encodeFrame(enc, { wallDt: 1 / 60, substeps: 8, gLocal: [0, -G0, 0], omega: [0, 0, 0], alpha: [0, 0, 0], flow: f >= 60 });
+      device.queue.submit([enc.finish()]);
+      sim.afterSubmit();
+      await sim.flush();
+    }
+    const st = await sim.readState();
+    const ys: number[] = [];
+    const rs: number[] = [];
+    let alive = 0;
+    for (let i = 0; i < sim.p.grainCap; i++) {
+      if (st.grains[i * 4 + 3] <= 0) continue;
+      alive++;
+      ys.push(st.grains[i * 4 + 1]);
+      rs.push(Math.hypot(st.grains[i * 4], st.grains[i * 4 + 2]));
+    }
+    const hist = new Array(10).fill(0);
+    for (const y of ys) hist[Math.min(9, Math.max(0, Math.floor((-y / 0.09) * 10)))]++;
+    rs.sort((a, b) => a - b);
+    const pr = (f: number) => ((rs[Math.floor(f * (rs.length - 1))] ?? 0) * 1000).toFixed(2);
+    const res = { emitted, alive, expectedInFlight: Math.round(42700 * 0.14), yHist_0to9cm: hist, radius_mm: { p50: pr(0.5), p90: pr(0.9), max: pr(1) } };
+    console.log('[stream] ' + JSON.stringify(res));
+    (window as any).__result = res;
+    return;
+  }
   if (mode === 'drain') await runDrainTest(device, rc, minutes);
   else if (mode === 'debug') await runDebug(device, rc, minutes);
   else if (mode === 'view') await runView(device, rc, minutes);

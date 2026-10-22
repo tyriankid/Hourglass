@@ -19,8 +19,9 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   let off = vec3f(cos(ang) * rad, 0.0, sin(ang) * rad);
   let v0 = U.misc.y * (0.85 + 0.3 * rnd(&seed));
   var v = vec3f(0.0, -dir * v0, 0.0);
-  v += off / R * v0 * 0.12;
-  v += (vec3f(rnd(&seed), rnd(&seed), rnd(&seed)) - 0.5) * v0 * 0.06;
+  // 真实沙漏的沙流基本保持孔口宽度：只有很小的发散和扰动
+  v += off / R * v0 * 0.035;
+  v += (vec3f(rnd(&seed), rnd(&seed), rnd(&seed)) - 0.5) * v0 * 0.02;
   grains[slot] = vec4f(off.x, -dir * rg * 2.0, off.z, 1.0);
   gvel[slot] = vec4f(v, rnd(&seed));
 }
