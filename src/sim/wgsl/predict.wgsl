@@ -8,8 +8,11 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   if (add > 0u && p.w > 0.0) {
     p.w += f32(add) * U.drain.z;
     pos[i].w = p.w;
+    rest[i] = vec4f(p.xyz, 0.0); // 质量变了：醒来
   }
   if (p.w <= 0.0) { predOut[i] = p; return; }
+  if (U.ints.z == 1u && rest[i].w < 0.0) { rest[i] = vec4f(p.xyz, 0.0); } // 沙漏在动：全部醒来
+  if (rest[i].w < 0.0) { predOut[i] = p; return; } // 休眠：锁定在原位
   let dt = U.g_dt.w;
   var v = vel[i].xyz;
   v += (U.g_dt.xyz + fict(p.xyz, v)) * dt;

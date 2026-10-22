@@ -1,7 +1,7 @@
 // GPU 沙子模拟：颗粒团（PBD）+ 孔口边界条件（Beverloo）+ 真实尺寸沙粒 + 沉积生长。
 // 每帧按墙钟时长切成若干子步，孔口抽走量按墙钟时间计算，掉帧也不影响流过的沙量。
 
-import { bindKernel, groups, makeKernel, timeKernelCompile, type BindSpec, type Kernel } from '../gpu/kernel';
+import { bindKernel, groups, makeKernel, type BindSpec, type Kernel } from '../gpu/kernel';
 import { BULB_H, PROFILE_N, innerRadius, profileTable } from '../geometry/profile';
 import { GRAIN_D, GRAIN_MASS, ORIFICE_D, beverlooRate, clumpMass } from '../physics';
 import typesSrc from './wgsl/types.wgsl?raw';
@@ -25,6 +25,9 @@ import condenseSrc from './wgsl/condense.wgsl?raw';
 import dissolveSrc from './wgsl/dissolve.wgsl?raw';
 import placeSrc from './wgsl/place.wgsl?raw';
 import fxStepSrc from './wgsl/fx_step.wgsl?raw';
+import sleepSrc from './wgsl/sleep.wgsl?raw';
+import solveGsSrc from './wgsl/solve_gs.wgsl?raw';
+import wakeSrc from './wgsl/wake.wgsl?raw';
 
 export interface SimParams {
   /** 颗粒团标称半径（m） */
@@ -45,7 +48,11 @@ export interface SimParams {
   sor: number;
   /** true：Jacobi 修正按接触数平均；false：直接累加再乘 sor（欠松弛） */
   average: boolean;
+  /** 求解器：'gs' 按网格着色的 Gauss-Seidel；'jacobi' 旧的 Jacobi */
+  solver: 'gs' | 'jacobi';
   vmax: number;
+  /** 诊断用：每个子步对颗粒团速度乘的系数（1 = 不阻尼） */
+  damp: number;
   /** 沙粒速度低于它（m/s）就停下沉积 */
   grainSettleV: number;
   /** 孔口捕获半径，以 rc 为单位 */
@@ -64,11 +71,13 @@ export function defaultParams(rc: number, maxSandMg: number): SimParams {
     muWall: 0.3,
     sleepV: 1.0e-3,
     shockK: 300,
-    sor: 0.5,
+    sor: 1.0,
     average: false,
+    solver: 'gs',
     vmax: 2.0,
+    damp: 1.0,
     grainSettleV: 0.04,
-    captureR: 3.5,
+    captureR: 5,
   };
 }
 
@@ -86,6 +95,8 @@ export interface FrameInput {
   flow: boolean;
   /** true 时网格里攒着的沙不等门槛，全部生成颗粒团（测试收尾、补算用） */
   flushDeposits?: boolean;
+  /** 沙漏在动（转动、加速、重力方向变化）：唤醒所有休眠的颗粒团 */
+  wakeAll?: boolean;
 }
 
 export interface FrameStats {
@@ -109,6 +120,11 @@ export interface FrameStats {
   massNeg: number;
   dissolved: number;
   placedFail: number;
+  gridOverflow: number;
+  /** 本帧平均每个子步里成片移动（> 2 cm/s）的颗粒团数 */
+  moving: number;
+  /** 本帧凝聚生成的质量（mg） */
+  condensed: number;
 }
 
 export const FX_CAP = 8192;
@@ -179,6 +195,7 @@ export class SandSim {
     mk('freeStack', p.clumpCap * 4);
     mk('pend', p.clumpCap * 4);
     mk('recv', p.clumpCap * 4);
+    mk('rest', p.clumpCap * 16);
     const UB = GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST;
     for (const o of ['opC', 'opD', 'opH', 'opP', 'opF']) mk(o, 64, UB);
     mk('hist', HIST_BINS * 4);
@@ -208,12 +225,18 @@ export class SandSim {
     const u32r = (name: string, kind: 'read' | 'rw' = 'read'): BindSpec => ({ name, kind, type: 'array<u32>' });
     const parts = (body: string, extra = '') => ({ types: typesSrc, fns: fnsSrc + '\n' + extra, body });
     const K = this.kernels;
-    K.predict = makeKernel(d, 'predict', parts(predictSrc), [U, P, v4('pos', 'rw'), v4('vel', 'read'), v4('predOut', 'rw'), atom('pend')]);
+    K.predict = makeKernel(d, 'predict', parts(predictSrc), [U, P, v4('pos', 'rw'), v4('vel', 'read'), v4('predOut', 'rw'), atom('pend'), v4('rest', 'rw')]);
     K.gridClear = makeKernel(d, 'gridClear', parts(gridClearSrc), [U, P, atom('grid')]);
     K.gridInsert = makeKernel(d, 'gridInsert', parts(gridInsertSrc), [U, P, v4('pred', 'read'), atom('grid'), atom('ctl')]);
     K.sink = makeKernel(d, 'sink', parts(sinkSrc), [U, P, v4('pos', 'rw'), v4('pred', 'rw'), atom('ctl'), u32r('freeStack', 'rw')]);
-    K.solve = makeKernel(d, 'solve', parts(solveSrc), [U, P, v4('pos', 'read'), v4('predIn', 'read'), v4('predOut', 'rw'), u32r('grid')]);
-    K.finalize = makeKernel(d, 'finalize', parts(finalizeSrc), [U, P, v4('pos', 'rw'), v4('vel', 'rw'), v4('pred', 'read'), atom('ctl')]);
+    const solveSpecs = [U, P, v4('pos', 'read'), v4('predIn', 'read'), v4('predOut', 'rw'), u32r('grid'), v4('rest', 'rw')];
+    K.solve = makeKernel(d, 'solve', parts(solveSrc), solveSpecs);
+    K.solveFirst = makeKernel(d, 'solveFirst', parts(solveSrc), solveSpecs, { FIRST: 1 });
+    const gsSpecs = [U, P, v4('pos', 'read'), v4('pred', 'rw'), u32r('grid'), v4('rest', 'read')];
+    for (let c = 0; c < 8; c++) K['gs' + c] = makeKernel(d, 'gs' + c, parts(solveGsSrc), gsSpecs, { COLOR: c });
+    K.wake = makeKernel(d, 'wake', parts(wakeSrc), [U, P, v4('vel', 'read'), v4('pred', 'read'), u32r('grid'), v4('rest', 'rw')]);
+    K.finalize = makeKernel(d, 'finalize', parts(finalizeSrc), [U, P, v4('pos', 'rw'), v4('vel', 'rw'), v4('pred', 'read'), atom('ctl'), v4('rest', 'rw')]);
+    K.sleep = makeKernel(d, 'sleep', parts(sleepSrc), [U, P, v4('pos', 'read'), v4('vel', 'rw'), v4('rest', 'rw')]);
     K.grainEmit = makeKernel(d, 'grainEmit', parts(grainEmitSrc, depositSrc), [U, P, v4('grains', 'rw'), v4('gvel', 'rw'), atom('ctl'), atom('dep')]);
     K.grainStep = makeKernel(
       d,
@@ -221,14 +244,14 @@ export class SandSim {
       parts(grainStepSrc, depositSrc),
       [U, P, v4('grains', 'rw'), v4('gvel', 'rw'), v4('pos', 'read'), u32r('grid'), atom('dep'), atom('ctl'), atom('pend')],
     );
-    K.spawn = makeKernel(d, 'spawn', parts(spawnSrc), [U, P, atom('dep'), u32r('grid'), v4('pos', 'rw'), v4('vel', 'rw'), u32r('freeStack'), atom('ctl')]);
+    K.spawn = makeKernel(d, 'spawn', parts(spawnSrc), [U, P, atom('dep'), u32r('grid'), v4('pos', 'rw'), v4('vel', 'rw'), u32r('freeStack'), atom('ctl'), v4('rest', 'rw')]);
     const O: BindSpec = { name: 'O', kind: 'uniform', type: 'OpU' };
     K.massSum = makeKernel(d, 'massSum', parts(massSumSrc), [U, P, v4('pos', 'read'), atom('ctl')]);
     K.hist = makeKernel(d, 'hist', parts(histSrc), [U, P, O, v4('pos', 'read'), atom('hist')]);
     const fxSpecs = [v4('fxPos', 'rw'), v4('fxVel', 'rw')];
-    K.condense = makeKernel(d, 'condense', parts(condenseSrc, fxFnSrc), [U, P, O, v4('pos', 'rw'), v4('vel', 'rw'), u32r('freeStack'), atom('ctl'), ...fxSpecs]);
+    K.condense = makeKernel(d, 'condense', parts(condenseSrc, fxFnSrc), [U, P, O, v4('pos', 'rw'), v4('vel', 'rw'), u32r('freeStack'), atom('ctl'), ...fxSpecs, v4('rest', 'rw'), u32r('grid')]);
     K.dissolve = makeKernel(d, 'dissolve', parts(dissolveSrc, fxFnSrc), [U, P, O, v4('pos', 'rw'), v4('vel', 'rw'), u32r('freeStack', 'rw'), atom('ctl'), ...fxSpecs]);
-    K.place = makeKernel(d, 'place', parts(placeSrc), [U, P, O, v4('items', 'read'), v4('pos', 'rw'), v4('vel', 'rw'), u32r('freeStack'), atom('ctl')]);
+    K.place = makeKernel(d, 'place', parts(placeSrc), [U, P, O, v4('items', 'read'), v4('pos', 'rw'), v4('vel', 'rw'), u32r('freeStack'), atom('ctl'), v4('rest', 'rw')]);
     K.fxStep = makeKernel(d, 'fxStep', parts(fxStepSrc), [U, P, O, ...fxSpecs]);
     K.mergePick = makeKernel(d, 'mergePick', parts(mergePickSrc), [U, P, v4('pos', 'read'), u32r('grid'), u32r('recv', 'rw')]);
     K.mergeApply = makeKernel(d, 'mergeApply', parts(mergeApplySrc), [U, P, v4('pos', 'rw'), u32r('recv'), atom('pend'), u32r('freeStack', 'rw'), atom('ctl')]);
@@ -236,14 +259,18 @@ export class SandSim {
     const B = this.buf;
     const base = { U: B.U, P: B.P };
     const bg = this.bg;
-    bg.predict = bindKernel(d, K.predict, { ...base, pos: B.pos, vel: B.vel, predOut: B.predA, pend: B.pend });
+    bg.predict = bindKernel(d, K.predict, { ...base, pos: B.pos, vel: B.vel, predOut: B.predA, pend: B.pend, rest: B.rest });
     bg.gridClear = bindKernel(d, K.gridClear, { ...base, grid: B.grid });
     bg.gridInsert = bindKernel(d, K.gridInsert, { ...base, pred: B.predA, grid: B.grid, ctl: B.ctl });
     bg.sink = bindKernel(d, K.sink, { ...base, pos: B.pos, pred: B.predA, ctl: B.ctl, freeStack: B.freeStack });
-    bg.solveAB = bindKernel(d, K.solve, { ...base, pos: B.pos, predIn: B.predA, predOut: B.predB, grid: B.grid });
-    bg.solveBA = bindKernel(d, K.solve, { ...base, pos: B.pos, predIn: B.predB, predOut: B.predA, grid: B.grid });
-    bg.finalizeA = bindKernel(d, K.finalize, { ...base, pos: B.pos, vel: B.vel, pred: B.predA, ctl: B.ctl });
-    bg.finalizeB = bindKernel(d, K.finalize, { ...base, pos: B.pos, vel: B.vel, pred: B.predB, ctl: B.ctl });
+    bg.solveAB = bindKernel(d, K.solve, { ...base, pos: B.pos, predIn: B.predA, predOut: B.predB, grid: B.grid, rest: B.rest });
+    bg.solveBA = bindKernel(d, K.solve, { ...base, pos: B.pos, predIn: B.predB, predOut: B.predA, grid: B.grid, rest: B.rest });
+    for (let c = 0; c < 8; c++) bg['gs' + c] = bindKernel(d, K['gs' + c], { ...base, pos: B.pos, pred: B.predA, grid: B.grid, rest: B.rest });
+    bg.wake = bindKernel(d, K.wake, { ...base, vel: B.vel, pred: B.predA, grid: B.grid, rest: B.rest });
+    bg.solveFirst = bindKernel(d, K.solveFirst, { ...base, pos: B.pos, predIn: B.predA, predOut: B.predB, grid: B.grid, rest: B.rest });
+    bg.finalizeA = bindKernel(d, K.finalize, { ...base, pos: B.pos, vel: B.vel, pred: B.predA, ctl: B.ctl, rest: B.rest });
+    bg.finalizeB = bindKernel(d, K.finalize, { ...base, pos: B.pos, vel: B.vel, pred: B.predB, ctl: B.ctl, rest: B.rest });
+    bg.sleep = bindKernel(d, K.sleep, { ...base, pos: B.pos, vel: B.vel, rest: B.rest });
     bg.grainEmit = bindKernel(d, K.grainEmit, { ...base, grains: B.grains, gvel: B.gvel, ctl: B.ctl, dep: B.dep });
     bg.grainStep = bindKernel(d, K.grainStep, {
       ...base,
@@ -258,9 +285,9 @@ export class SandSim {
     bg.massSum = bindKernel(d, K.massSum, { ...base, pos: B.pos, ctl: B.ctl });
     bg.hist = bindKernel(d, K.hist, { ...base, O: B.opH, pos: B.pos, hist: B.hist });
     const fx = { fxPos: B.fxPos, fxVel: B.fxVel };
-    bg.condense = bindKernel(d, K.condense, { ...base, O: B.opC, pos: B.pos, vel: B.vel, freeStack: B.freeStack, ctl: B.ctl, ...fx });
+    bg.condense = bindKernel(d, K.condense, { ...base, O: B.opC, pos: B.pos, vel: B.vel, freeStack: B.freeStack, ctl: B.ctl, ...fx, rest: B.rest, grid: B.grid });
     bg.dissolve = bindKernel(d, K.dissolve, { ...base, O: B.opD, pos: B.pos, vel: B.vel, freeStack: B.freeStack, ctl: B.ctl, ...fx });
-    bg.place = bindKernel(d, K.place, { ...base, O: B.opP, items: B.items, pos: B.pos, vel: B.vel, freeStack: B.freeStack, ctl: B.ctl });
+    bg.place = bindKernel(d, K.place, { ...base, O: B.opP, items: B.items, pos: B.pos, vel: B.vel, freeStack: B.freeStack, ctl: B.ctl, rest: B.rest });
     bg.fxStep = bindKernel(d, K.fxStep, { ...base, O: B.opF, ...fx });
     bg.mergePick = bindKernel(d, K.mergePick, { ...base, pos: B.pos, grid: B.grid, recv: B.recv });
     bg.mergeApply = bindKernel(d, K.mergeApply, { ...base, pos: B.pos, recv: B.recv, pend: B.pend, freeStack: B.freeStack, ctl: B.ctl });
@@ -272,6 +299,7 @@ export class SandSim {
       vel: B.vel,
       freeStack: B.freeStack,
       ctl: B.ctl,
+      rest: B.rest,
     });
   }
 
@@ -288,6 +316,9 @@ export class SandSim {
     q.writeBuffer(this.buf.predA, 0, pos);
     q.writeBuffer(this.buf.predB, 0, pos);
     q.writeBuffer(this.buf.vel, 0, new Float32Array(cap * 4));
+    const rest = new Float32Array(pos);
+    for (let i = 0; i < cap; i++) rest[i * 4 + 3] = 0;
+    q.writeBuffer(this.buf.rest, 0, rest);
     // 空闲栈：栈顶弹出的是最小的空闲下标
     const free = new Uint32Array(cap);
     const nFree = cap - n;
@@ -305,6 +336,11 @@ export class SandSim {
     q.writeBuffer(this.buf.fxPos, 0, new Float32Array(FX_CAP * 4));
     this.prevKin = null;
     this.resetStats = true;
+  }
+
+  /** 下一次 encodeFrame 的帧号（与 FrameStats.frame 对应） */
+  get nextFrame(): number {
+    return this.frameNo + 1;
   }
 
   /** 由有效重力求孔口状态：上游方向和 Beverloo 流量（mg/s） */
@@ -340,8 +376,8 @@ export class SandSim {
       fv.set([flowing ? o.rate * drainDt : 0, flowing ? o.upstream : 0, GRAIN_MASS, p.captureR * p.rc], 20);
       fv.set([p.muS, p.muK, p.muWall, p.sleepV], 24);
       fv.set([p.shockK, Math.sqrt(Math.max(o.gAxial, 0.5) * ORIFICE_D), GRAIN_D / 2, p.sor], 28);
-      uv.set([p.grainCap, p.average ? 1 : 0, 0, 0], 32);
-      fv.set([p.vmax, p.grainSettleV, f.flushDeposits ? 1 : 0, 0], 36);
+      uv.set([p.grainCap, p.average ? 1 : 0, f.wakeAll ? 1 : 0, 0], 32);
+      fv.set([p.vmax, p.grainSettleV, f.flushDeposits ? 1 : 0, p.damp], 36);
     }
     this.prevKin = { g: [...f.gLocal], w: [...f.omega], a: [...f.alpha] };
     this.device.queue.writeBuffer(this.buf.U, 0, this.uData, 0, U_STRIDE * (n + 1));
@@ -352,7 +388,7 @@ export class SandSim {
     this.writeUniforms(f);
     if (this.resetStats) {
       this.device.queue.writeBuffer(this.buf.ctl, 8 * 4, new Uint32Array(12));
-      this.device.queue.writeBuffer(this.buf.ctl, 24 * 4, new Uint32Array(4));
+      this.device.queue.writeBuffer(this.buf.ctl, 24 * 4, new Uint32Array(7));
       this.resetStats = false;
     }
     const cap = this.p.clumpCap;
@@ -373,9 +409,16 @@ export class SandSim {
       pass.setBindGroup(0, this.bg.sink, [slot * U_STRIDE]);
       pass.dispatchWorkgroups(1);
       let inA = true;
-      for (let it = 0; it < this.p.iterations; it++) {
-        run('solve', inA ? 'solveAB' : 'solveBA', cap);
-        inA = !inA;
+      if (this.p.solver === 'gs') {
+        run('wake', 'wake', cap);
+        const half = Math.ceil(this.dims[0] / 2) * Math.ceil(this.dims[1] / 2) * Math.ceil(this.dims[2] / 2);
+        for (let it = 0; it < this.p.iterations; it++) for (let c = 0; c < 8; c++) run('gs' + c, 'gs' + c, half);
+      } else {
+        for (let it = 0; it < this.p.iterations; it++) {
+          if (it === 0) run('solveFirst', 'solveFirst', cap);
+          else run('solve', inA ? 'solveAB' : 'solveBA', cap);
+          inA = !inA;
+        }
       }
       run('finalize', inA ? 'finalizeA' : 'finalizeB', cap);
       run('grainEmit', 'grainEmit', 1024);
@@ -384,6 +427,7 @@ export class SandSim {
     }
     // 每帧一次：合并互相接触的未满颗粒团
     slot = nSub;
+    run('sleep', 'sleep', cap);
     run('mergePick', 'mergePick', cap);
     run('mergeApply', 'mergeApply', cap);
     run('massSum', 'massSum', cap);
@@ -396,7 +440,7 @@ export class SandSim {
       encoder.copyBufferToBuffer(this.buf.ctl, 0, stage.buf, 0, STATS_WORDS * 4);
       stage.busy = true;
       this.resetStats = true;
-      this.toMap.push({ slot: stage, frame: this.frameNo });
+      this.toMap.push({ slot: stage, frame: this.frameNo, substeps: nSub });
     }
   }
 
@@ -446,11 +490,22 @@ export class SandSim {
     pass.end();
   }
 
-  /** 凝聚：在 [y0, y1] 的空腔里随机生成 count 个颗粒团 */
+  /** 凝聚：在 [y0, y1] 的空腔里按点阵生成最多 count 个颗粒团（同批互不重叠，并避开已有的颗粒团） */
   condense(encoder: GPUCommandEncoder, op: CondenseOp) {
     if (op.count <= 0) return;
-    this.writeOp('opC', [op.y0, op.y1, op.bulb, op.count], [Math.random() * 1e9, op.time, op.glow ? 1 : 0, op.massEach], [...op.up, 0], [0, FX_CAP, 0, 0]);
-    this.dispatchOp(encoder, 'condense', op.count);
+    const sp = 2.3 * this.p.rc;
+    const rmax = profileTable()[(PROFILE_N + 1) * 4 + 2];
+    const nxl = Math.ceil((2 * rmax) / sp);
+    const nyl = Math.max(1, Math.ceil(Math.abs(op.y1 - op.y0) / sp));
+    const total = nxl * nxl * nyl;
+    // 与格点总数互素的步长，把各线程打散到不同的格点上
+    const gcd = (a: number, b: number): number => (b === 0 ? a : gcd(b, a % b));
+    let stride = Math.floor(total * 0.618) | 1;
+    while (gcd(stride, total) !== 1) stride += 2;
+    const start = Math.floor(Math.random() * total);
+    const count = Math.min(op.count, total);
+    this.writeOp('opC', [op.y0, op.y1, op.bulb, count], [Math.random() * 1e6, op.time, op.glow ? 1 : 0, op.massEach], [...op.up, 0], [start, FX_CAP, total, stride]);
+    this.dispatchOp(encoder, 'condense', count);
   }
 
   /** 消散：去掉 bulb 泡里沿 up 方向高度超过 threshold 的颗粒团 */
@@ -499,7 +554,7 @@ export class SandSim {
     return out;
   }
 
-  private toMap: Array<{ slot: { buf: GPUBuffer; busy: boolean }; frame: number }> = [];
+  private toMap: Array<{ slot: { buf: GPUBuffer; busy: boolean }; frame: number; substeps: number }> = [];
   private chain: Promise<void> = Promise.resolve();
 
   /** submit 之后调用：异步读回本帧统计，按提交顺序回调 onStats */
@@ -532,6 +587,9 @@ export class SandSim {
           massNeg: u[25] / 1000,
           dissolved: u[26] / 1000,
           placedFail: u[27],
+          gridOverflow: u[28],
+          moving: u[29] / Math.max(1, job.substeps),
+          condensed: u[30] / 1000,
           clumpsAlive: this.p.clumpCap - u[0],
         });
       });
@@ -544,7 +602,7 @@ export class SandSim {
   }
 
   /** 读回全部颗粒团和沙粒（测试用） */
-  async readState(): Promise<{ pos: Float32Array; grains: Float32Array; dep: Uint32Array; pend: Uint32Array }> {
+  async readState(): Promise<{ pos: Float32Array; grains: Float32Array; dep: Uint32Array; pend: Uint32Array; rest: Float32Array }> {
     const d = this.device;
     const read = async (src: GPUBuffer) => {
       const b = d.createBuffer({ size: src.size, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
@@ -562,32 +620,8 @@ export class SandSim {
       grains: await read(this.buf.grains),
       dep: new Uint32Array((await read(this.buf.dep)).buffer),
       pend: new Uint32Array((await read(this.buf.pend)).buffer),
+      rest: await read(this.buf.rest),
     };
-  }
-}
-
-/** 诊断：逐个编译所有物理内核并打印耗时 */
-export async function diagnoseCompile(device: GPUDevice) {
-  const U: BindSpec = { name: 'U', kind: 'uniform', type: 'SimU' };
-  const P: BindSpec = { name: 'P', kind: 'uniform', type: 'Profile' };
-  const v4 = (name: string, kind: 'read' | 'rw'): BindSpec => ({ name, kind, type: 'array<vec4f>' });
-  const atom = (name: string): BindSpec => ({ name, kind: 'rw', type: 'array<atomic<u32>>' });
-  const u32r = (name: string, kind: 'read' | 'rw' = 'read'): BindSpec => ({ name, kind, type: 'array<u32>' });
-  const parts = (body: string, extra = '') => ({ types: typesSrc, fns: fnsSrc + '\n' + extra, body });
-  const list: Array<[string, ReturnType<typeof parts>, BindSpec[]]> = [
-    ['gridClear', parts(gridClearSrc), [U, P, atom('grid')]],
-    ['predict', parts(predictSrc), [U, P, v4('pos', 'read'), v4('vel', 'read'), v4('predOut', 'rw')]],
-    ['gridInsert', parts(gridInsertSrc), [U, P, v4('pred', 'read'), atom('grid'), atom('ctl')]],
-    ['finalize', parts(finalizeSrc), [U, P, v4('pos', 'rw'), v4('vel', 'rw'), v4('pred', 'read'), atom('ctl')]],
-    ['spawn', parts(spawnSrc), [U, P, atom('dep'), u32r('grid'), v4('pos', 'rw'), v4('vel', 'rw'), u32r('freeStack'), atom('ctl')]],
-    ['grainEmit', parts(grainEmitSrc, depositSrc), [U, P, v4('grains', 'rw'), v4('gvel', 'rw'), atom('ctl'), atom('dep')]],
-    ['sink', parts(sinkSrc), [U, P, v4('pos', 'rw'), v4('pred', 'rw'), atom('ctl'), u32r('freeStack', 'rw')]],
-    ['solve', parts(solveSrc), [U, P, v4('pos', 'read'), v4('predIn', 'read'), v4('predOut', 'rw'), u32r('grid')]],
-    ['grainStep', parts(grainStepSrc, depositSrc), [U, P, v4('grains', 'rw'), v4('gvel', 'rw'), v4('pos', 'read'), u32r('grid'), atom('dep'), atom('ctl')]],
-  ];
-  for (const [name, pr, specs] of list) {
-    const ms = await timeKernelCompile(device, name, pr, specs);
-    console.log(`[compile] ${name} ${ms.toFixed(0)} ms`);
   }
 }
 

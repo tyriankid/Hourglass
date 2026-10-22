@@ -36,7 +36,7 @@ page.on('console', (m) => console.log(`[page:${m.type()}]`, m.text()));
 page.on('pageerror', (e) => console.log('[pageerror]', e.message));
 await page.goto(process.env.PAGE ? `${url}${process.env.PAGE}` : `${url}?${query}`);
 log('page loaded ' + url);
-if (/test=(1|restore)/.test(query)) {
+if (/test=(1|restore)|probe=film/.test(query)) {
   // 场景测试：页面请求截图时截图，直到出结果
   const base = shot || '.scratch/shots/scenario';
   for (;;) {
@@ -60,7 +60,7 @@ if (/test=(1|restore)/.test(query)) {
   console.log('RESULT', JSON.stringify(await page.evaluate(() => window.__result)));
   await page.waitForTimeout(500);
   if (shot) await page.screenshot({ path: shot });
-} else if (/mode=(drain|compile|bench|inspect|stream)|test=finish/.test(query) || process.env.PAGE) {
+} else if (/mode=(drain|compile|bench|inspect|stream|neck)|test=finish|probe=/.test(query) || process.env.PAGE) {
   await page.waitForFunction(() => window.__result, null, { timeout: 0, polling: 2000 });
   console.log('RESULT', JSON.stringify(await page.evaluate(() => window.__result), null, 2));
 } else {

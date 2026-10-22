@@ -9,8 +9,8 @@ struct SimU {
   drain: vec4f,     // 本子步孔口抽走目标（mg），上游方向（+1 上泡流、-1 下泡流、0 不流），单粒沙质量（mg），捕获半径
   fric: vec4f,      // 颗粒团静摩擦 μs，动摩擦 μk，与玻璃的摩擦，休眠速度
   misc: vec4f,      // shock propagation 系数，孔口出口速度，沙粒半径，SOR 系数
-  ints: vec4u,      // 沙粒容量，是否按接触数平均，0，0
-  lim: vec4f,       // 最大速度，沙粒停留速度，0，0
+  ints: vec4u,      // 沙粒容量，是否按接触数平均，全部唤醒（沙漏在动），0
+  lim: vec4f,       // 最大速度，沙粒停留速度，是否强制生成网格里攒的沙，速度阻尼系数
 }
 
 // 玻璃轮廓采样表：0..128 为 vec4(rIn, drIn, rOut, drOut)，129 为 vec4(H, 孔半径, 最大内半径, 端盖半径)
@@ -43,6 +43,9 @@ const C_MASS_POS: u32 = 24u;    // y > 0 的泡
 const C_MASS_NEG: u32 = 25u;    // y < 0 的泡
 const C_DISSOLVED: u32 = 26u;
 const C_PLACED_FAIL: u32 = 27u;
+const C_GRID_OVERFLOW: u32 = 28u; // 网格槽位不够、漏登记的颗粒团次数
+const C_MOVING: u32 = 29u;      // 本帧各子步里速度 > 2 cm/s 的颗粒团计数之和
+const C_CONDENSED: u32 = 30u;   // 本帧凝聚生成的质量（µg）
 // 以下为每帧统计，CPU 在帧开始清零
 const C_DRAINED: u32 = 8u;      // 本帧流过孔口的沙（mg，f32）
 const C_EMITTED: u32 = 9u;      // 本帧发射的沙粒数

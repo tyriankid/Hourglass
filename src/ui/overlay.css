@@ -195,3 +195,30 @@
   opacity: 1;
   transition: opacity 0.15s ease;
 }
+
+.hg-actions {
+  display: flex;
+  gap: 26px;
+  min-height: 36px;
+  transition: opacity 0.8s ease;
+}
+
+.hg-actions.hg-fade {
+  opacity: 0.45;
+}
+
+.hg-act {
+  pointer-events: auto;
+  border: none;
+  background: none;
+  font: 300 14px/1 var(--font);
+  letter-spacing: 0.18em;
+  color: var(--ink-soft);
+  padding: 10px 4px;
+  cursor: pointer;
+  transition: color 0.2s;
+}
+
+.hg-act:hover {
+  color: var(--ink);
+}

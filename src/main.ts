@@ -5,8 +5,9 @@ import { rigid } from './math/mat4';
 import { Renderer } from './render/Renderer';
 import { App } from './app/App';
 import { loadSettings } from './ui/Overlay';
+import { runProbe } from './debug/probes';
 import { G0, GRAIN_MASS, W0, sandMassForSeconds } from './physics';
-import { SandSim, defaultParams, diagnoseCompile, seedBulb, type FrameInput, type FrameStats } from './sim/SandSim';
+import { SandSim, defaultParams, seedBulb, type FrameInput, type FrameStats } from './sim/SandSim';
 
 const params = new URLSearchParams(location.search);
 const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Mac/.test(navigator.userAgent));
@@ -475,11 +476,6 @@ async function main() {
   const mode = params.get('mode') ?? 'app';
   const rc = Number(params.get('rc') ?? (isMobile ? 1.0 : 0.75)) / 1000;
   const minutes = Number(params.get('min') ?? (mode === 'drain' ? 1 : 5));
-  if (mode === 'compile') {
-    await diagnoseCompile(device);
-    (window as any).__result = { ok: true };
-    return;
-  }
   if (mode === 'bench') {
     const sim = new SandSim(device, defaultParams(rc, sandMassForSeconds(3600)));
     sim.seed(seedBulb(rc, sandMassForSeconds(minutes * 60), 1, 1, 7));
@@ -560,6 +556,48 @@ async function main() {
     (window as any).__result = { ok: true };
     return;
   }
+  if (mode === 'neck') {
+    // 瓶颈现场：沙在上泡，沉降 1 s 后开孔口流 3 s，列出离孔口最近的颗粒团
+    const sp = defaultParams(rc, sandMassForSeconds(3600));
+    if (params.get('solver')) (sp as any).solver = params.get('solver');
+    const sim = new SandSim(device, sp);
+    sim.seed(seedBulb(rc, sandMassForSeconds(minutes * 60), 1, 1, Number(params.get('seedn') ?? 5)));
+    let drained = 0;
+    sim.onStats = (s) => (drained += s.drained);
+    const settleF = Number(params.get('settle') ?? 60);
+    const flowF = Number(params.get('flowf') ?? 180);
+    for (let f = 0; f < settleF + flowF; f++) {
+      const enc = device.createCommandEncoder();
+      sim.encodeFrame(enc, { wallDt: 1 / 60, substeps: 8, gLocal: [0, -G0, 0], omega: [0, 0, 0], alpha: [0, 0, 0], flow: f >= settleF });
+      device.queue.submit([enc.finish()]);
+      sim.afterSubmit();
+      await sim.flush();
+      if (f % 30 === 29) console.log(`[neck] f=${f} drained=${drained.toFixed(2)} mg`);
+    }
+    const st = await sim.readState();
+    const vel = await (async () => {
+      const b = device.createBuffer({ size: sim.buf.vel.size, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+      const e = device.createCommandEncoder();
+      e.copyBufferToBuffer(sim.buf.vel, 0, b, 0, sim.buf.vel.size);
+      device.queue.submit([e.finish()]);
+      await b.mapAsync(GPUMapMode.READ);
+      const o = new Float32Array(b.getMappedRange().slice(0));
+      b.unmap();
+      return o;
+    })();
+    const rows: any[] = [];
+    for (let i = 0; i < sim.p.clumpCap; i++) {
+      const m = st.pos[i * 4 + 3];
+      if (m <= 0) continue;
+      const x = st.pos[i * 4], y = st.pos[i * 4 + 1], z = st.pos[i * 4 + 2];
+      rows.push({ d: Math.hypot(x, y, z) * 1000, y: +(y * 1000).toFixed(2), r: +(Math.hypot(x, z) * 1000).toFixed(2), m: +(m / sim.mc).toFixed(2), rest: +st.rest[i * 4 + 3].toFixed(0), v: +(Math.hypot(vel[i * 4], vel[i * 4 + 1], vel[i * 4 + 2]) * 1000).toFixed(2) });
+    }
+    rows.sort((a, b) => a.d - b.d);
+    const near = rows.slice(0, 20).map((r) => ({ ...r, d: +r.d.toFixed(2) }));
+    console.log('[neck] nearest ' + JSON.stringify(near));
+    (window as any).__result = { drained, near: near.length };
+    return;
+  }
   if (mode === 'stream') {
     // 沙流统计：在飞沙粒的数量、高度分布、横向散布
     const sim = new SandSim(device, defaultParams(rc, sandMassForSeconds(3600)));
@@ -607,14 +645,29 @@ async function main() {
     const q = settings.quality === 'auto' ? (isMobile ? 'medium' : 'high') : settings.quality;
     const tier = tiers[q];
     const appRc = params.get('rc') ? rc : tier.rc / 1000;
-    const app = new App(device, document.getElementById('view') as HTMLCanvasElement, appRc, settings, tier);
+    // 诊断用的物理参数覆盖：?damp=0.9&sleep=0.005&iters=4&sub=…
+    const ov: Record<string, number> = {};
+    for (const [k, key] of [
+      ['damp', 'damp'],
+      ['sleep', 'sleepV'],
+      ['iters', 'iterations'],
+      ['sor', 'sor'],
+      ['shock', 'shockK'],
+    ] as const)
+      if (params.get(k)) ov[key] = Number(params.get(k));
+    if (params.get('avg')) (ov as any).average = params.get('avg') === '1';
+    if (params.get('solver')) (ov as any).solver = params.get('solver');
+    const app = new App(device, document.getElementById('view') as HTMLCanvasElement, appRc, settings, tier, ov);
     (window as any).__app = app;
     if (params.get('scale')) {
       app.renderer.renderScale = Number(params.get('scale'));
       app.autoScale = false;
     }
     if (params.get('hud') === '1') attachHud(app, device);
-    if (params.get('test') === '1') await runAppScenario(app);
+    if (params.get('probe')) {
+      if (params.get('render') !== '1') app.renderer.upto = 0;
+      await runProbe(app, params.get('probe')!, params);
+    } else if (params.get('test') === '1') await runAppScenario(app);
     else if (params.get('test') === 'finish') await runFinishScenario(app);
     else if (params.get('test') === 'restore') {
       // 伪造一个 30 s 前存档的会话：2 分钟的沙，已流 30 s，离开 10 s → 恢复后应剩约 80 s

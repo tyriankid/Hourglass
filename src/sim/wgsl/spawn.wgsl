@@ -27,6 +27,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     if (q.w > 0.0 && q.w < mc && cellIdx(cellOf(q.xyz)) == i32(c)) {
       let add = min(rem, mc - q.w);
       pos[j].w = q.w + add;
+      rest[j] = vec4f(q.xyz, 0.0);
       rem -= add;
     }
   }
@@ -41,6 +42,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     let m = min(rem, mc);
     pos[j] = vec4f(centroid, m);
     vel[j] = vec4f(0.0);
+    rest[j] = vec4f(centroid, 0.0);
     rem -= m;
   }
 }

@@ -20,6 +20,32 @@ const CHORDS = [
 
 const midi = (m: number) => 440 * Math.pow(2, (m - 69) / 12);
 
+export interface SandVoice {
+  bed: number;
+  clicks: number;
+  amp: number;
+  glass: number;
+  slide: number;
+}
+
+/**
+ * 物理统计 → 沙声参数（纯函数，便于离线验证）。
+ * 安静为先：底噪和噼啪都偏轻；滑动声只由"成片移动的颗粒团数"驱动，个别颗粒的数值抖动不会出声。
+ */
+export function sandVoice(stats: Pick<FrameStats, 'impactsSand' | 'impactSpeedSum' | 'impactsGlass' | 'moving'>, dt: number): SandVoice {
+  const fdt = Math.max(dt, 1 / 240);
+  const impacts = stats.impactsSand / fdt;
+  const speed = stats.impactsSand > 0 ? stats.impactSpeedSum / stats.impactsSand : 0;
+  const energy = impacts * speed * speed;
+  return {
+    bed: Math.min(0.12, 1.3e-4 * Math.sqrt(energy)),
+    clicks: Math.min(1400, impacts * 0.02),
+    amp: Math.min(0.3, 0.2 * Math.min(1, speed / 1.2) + 0.05),
+    glass: Math.min(200, (stats.impactsGlass / fdt) * 0.05),
+    slide: Math.min(0.16, Math.max(0, (stats.moving - 40) / 1500) * 0.16),
+  };
+}
+
 export class AudioEngine {
   private ctx: AudioContext | null = null;
   private sand: AudioWorkletNode | null = null;
@@ -114,17 +140,7 @@ export class AudioEngine {
   /** 每帧：把物理统计换成沙声参数（平滑过渡） */
   update(stats: FrameStats | null, dt: number) {
     if (!this.ctx || !this.sand || !stats || dt <= 0) return;
-    const fdt = Math.max(dt, 1 / 240);
-    const impacts = stats.impactsSand / fdt;
-    const speed = stats.impactsSand > 0 ? stats.impactSpeedSum / stats.impactsSand : 0;
-    const energy = impacts * speed * speed;
-    const target = {
-      bed: Math.min(0.25, 2.2e-4 * Math.sqrt(energy)),
-      clicks: Math.min(2500, impacts * 0.035),
-      amp: Math.min(0.6, 0.35 * Math.min(1, speed / 1.2) + 0.08),
-      glass: Math.min(600, (stats.impactsGlass / fdt) * 0.15),
-      slide: Math.min(0.5, Math.max(0, (stats.maxSpeed - 0.03) / 0.4) * 0.35),
-    };
+    const target = sandVoice(stats, dt);
     if (this.muted) {
       target.bed = target.clicks = target.glass = target.slide = 0;
     }

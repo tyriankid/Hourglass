@@ -8,7 +8,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   let c = cellIdx(cellOf(p.xyz));
   if (c < 0) { return; }
   let slot = atomicAdd(&grid[u32(c)], 1u);
-  if (slot < SLOTS) { atomicStore(&grid[nCells() + u32(c) * SLOTS + slot], i); }
+  if (slot < SLOTS) { atomicStore(&grid[nCells() + u32(c) * SLOTS + slot], i); } else { atomicAdd(&ctl[C_GRID_OVERFLOW], 1u); }
   let up = U.drain.y;
   if (up != 0.0 && p.y * up > 0.0) {
     let d = length(p.xyz);

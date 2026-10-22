@@ -12,4 +12,5 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   let j = freeStack[t - 1u];
   pos[j] = items[k];
   vel[j] = vec4f(0.0);
+  rest[j] = vec4f(items[k].xyz, 0.0);
 }

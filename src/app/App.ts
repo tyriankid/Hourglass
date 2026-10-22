@@ -6,7 +6,7 @@ import { HourglassMotion } from '../interaction/Motion';
 import { Input } from '../interaction/Input';
 import { RHO_BULK, W0, beverlooRate, clumpMass } from '../physics';
 import { Renderer } from '../render/Renderer';
-import { HIST_BINS, SandSim, defaultParams, seedBulb, type FrameStats } from '../sim/SandSim';
+import { HIST_BINS, SandSim, defaultParams, seedBulb, type FrameStats, type SimParams } from '../sim/SandSim';
 import { Overlay, type Settings } from '../ui/Overlay';
 import { AudioEngine } from '../audio/AudioEngine';
 import type { Vec3 } from '../math/mat4';
@@ -66,6 +66,7 @@ export class App {
   private prev = performance.now();
   private inFlight = 0;
   private lastStats: FrameStats | null = null;
+  private prevG: number[] | null = null;
   /** 帧时间的指数平均（ms），用于自适应分辨率和性能面板 */
   frameMs = 16.7;
   substepsUsed = 8;
@@ -79,8 +80,9 @@ export class App {
     readonly rc: number,
     readonly settings: Settings,
     tier: { maxDpr: number; photons: number } = { maxDpr: 2, photons: 768 },
+    simOverrides: Partial<SimParams> = {},
   ) {
-    this.sim = new SandSim(device, defaultParams(rc, MAX_SAND));
+    this.sim = new SandSim(device, { ...defaultParams(rc, MAX_SAND), ...simOverrides });
     this.mc = clumpMass(rc);
     this.renderer = new Renderer(device, canvas, this.sim, tier.photons);
     this.renderer.maxDpr = tier.maxDpr;
@@ -89,7 +91,6 @@ export class App {
     this.ui = new Overlay(settings);
     this.audio = new AudioEngine(settings);
     this.input.onTapHourglass = () => this.tap();
-    this.ui.onReset = () => this.reset();
     this.ui.onMinutes = () => {
       this.cooldown = Math.min(this.cooldown, 2);
       this.audio.tick();
@@ -263,7 +264,8 @@ export class App {
   private ready(): boolean {
     const target = W0 * this.ui.minutes * 60;
     const m = this.downBulb() > 0 ? this.massPos : this.massNeg;
-    return Math.abs(m - target) <= 1 && this.cooldown === 0 && !this.histBusy && this.maxSpeed < 0.08 && this.statsSeen > 10;
+    // 只要求沙量正确：沙还在沉降时翻转，在物理上没有任何问题
+    return Math.abs(m - target) <= 1 && this.cooldown === 0 && this.settled() && this.statsSeen > 10;
   }
 
   private onStats(s: FrameStats) {
@@ -277,41 +279,44 @@ export class App {
 
   // ───────── 沙量控制器（调时间时） ─────────
 
+  /** 已请求凝聚、但还没反映到测量值里的沙量（按帧号记账，统计读回后扣掉） */
+  private pendingSpawn: Array<{ frame: number; mg: number }> = [];
+
   private controller(enc: GPUCommandEncoder) {
     if (this.cooldown > 0) {
       this.cooldown--;
       return;
     }
     if (this.histBusy || this.statsSeen < 3) return;
+    const seen = this.lastStats?.frame ?? 0;
+    this.pendingSpawn = this.pendingSpawn.filter((p) => p.frame > seen);
+    const inflight = this.pendingSpawn.reduce((a, p) => a + p.mg, 0);
     const target = W0 * this.ui.minutes * 60;
     const s = this.downBulb();
     const measured = s > 0 ? this.massPos : this.massNeg;
-    const diff = target - measured;
+    const diff = target - measured - inflight;
     const up = this.motion.localUp();
     if (diff > 1) {
       // 在下泡空腔里凝聚：区域避开沙堆（平铺高度再往瓶颈方向让出锥顶的高度）
-      const flat = flatLevelFromNeck(measured / RHO_BULK);
+      const flat = flatLevelFromNeck((measured + inflight) / RHO_BULK);
       const far = Math.min(0.6 * H, flat - 0.025);
       const near = 0.07 * H;
       const lo = far > near + 0.008 ? near : 0.04 * H;
       const hi = far > near + 0.008 ? far : 0.14 * H;
-      const ra = innerRadius(lo)[0];
-      const rb = innerRadius(hi)[0];
-      const vol = (Math.PI / 3) * (hi - lo) * (ra * ra + ra * rb + rb * rb);
-      const vClump = (4 / 3) * Math.PI * this.rc ** 3;
-      const cap = Math.max(1, Math.floor((vol * 0.07) / vClump));
+      // 每帧一小批：60 分钟的沙约 3 秒凝聚完
+      const perFrame = Math.max(30, Math.ceil(MAX_SAND / this.mc / 180));
       let count: number;
       let massEach: number;
       if (diff < this.mc) {
         count = 1;
         massEach = diff;
       } else {
-        count = Math.min(cap, Math.floor(diff / this.mc));
+        count = Math.min(perFrame, Math.floor(diff / this.mc));
         massEach = this.mc;
       }
       this.sim.condense(enc, { y0: s * lo, y1: s * hi, bulb: s, count, massEach, glow: true, time: this.time, up });
-      this.cooldown = 3;
-    } else if (diff < -1) {
+      this.pendingSpawn.push({ frame: this.sim.nextFrame, mg: count * massEach });
+    } else if (diff < -1 && inflight === 0) {
       // 多了：读高度直方图，从顶层往下消散刚好够的量
       this.histBusy = true;
       const lo = -H - 0.01;
@@ -332,6 +337,12 @@ export class App {
         this.cooldown = 4;
       });
     }
+  }
+
+  /** 凝聚、消散都已结束：没有在途的生成，也没有在读的直方图 */
+  private settled(): boolean {
+    const seen = this.lastStats?.frame ?? 0;
+    return this.pendingSpawn.every((p) => p.frame <= seen) && !this.histBusy;
   }
 
   // ───────── 离开画面后的补算 ─────────
@@ -470,6 +481,14 @@ export class App {
     const substeps = Math.max(4, Math.min(16, Math.max(byStability, byMotion)));
     this.substepsUsed = substeps;
 
+    // 沙漏在动（转动、加速、重力方向变化）时唤醒所有休眠的颗粒团
+    const w = Math.hypot(...kin.omega);
+    const al = Math.hypot(...kin.alpha);
+    const gl = Math.hypot(...kin.gLocal);
+    const prevG = this.prevG;
+    const gTurn = prevG ? Math.acos(Math.min(1, (prevG[0] * kin.gLocal[0] + prevG[1] * kin.gLocal[1] + prevG[2] * kin.gLocal[2]) / (gl * Math.hypot(...prevG)))) : 0;
+    this.prevG = [...kin.gLocal];
+    const wakeAll = w > 0.02 || al > 0.3 || Math.abs(gl - 9.81) > 0.08 || gTurn > 0.0015;
     const enc = this.device.createCommandEncoder();
     if (this.state === 'idle') {
       this.controller(enc);
@@ -484,6 +503,7 @@ export class App {
       alpha: kin.alpha,
       flow: true,
       flushDeposits: this.state === 'idle',
+      wakeAll,
     });
     this.renderer.model = this.motion.model();
     // 对准点比瓶颈略低，沙漏在画面里偏上，给底部的时间和刻度尺留位置
@@ -520,22 +540,22 @@ export class App {
 
   private updateUi() {
     const ui = this.ui;
+    const restart = { label: '重新开始', run: () => this.reset() };
     switch (this.state) {
-      case 'idle': {
+      case 'idle':
         ui.setTime(formatClock(ui.minutes * 60));
-        ui.setHint(this.flipQueued ? '沙子正在落下…' : '轻点沙漏开始');
+        ui.setHint(this.flipQueued ? '正在准备…' : '轻点沙漏开始');
+        ui.setActions([]);
         ui.showRuler(true);
-        ui.showReset(false);
         break;
-      }
       case 'flipping':
       case 'running':
       case 'rising': {
         const c = this.clock!;
         ui.setTime(formatClock(c.remainingSeconds));
-        ui.setHint(this.state === 'running' ? '轻点沙漏暂停' : '');
+        ui.setHint('');
+        ui.setActions(this.state === 'running' ? [{ label: '暂停', run: () => this.tap() }, restart] : []);
         ui.showRuler(false);
-        ui.showReset(true);
         const upMass = this.downBulb() > 0 ? this.massNeg : this.massPos;
         if (this.state === 'running' && (c.done || (c.remainingSeconds < 1 && upMass < 1))) {
           this.state = 'finished';
@@ -548,16 +568,25 @@ export class App {
       case 'laying':
       case 'paused':
         ui.setTime(formatClock(this.clock!.remainingSeconds));
-        ui.setHint(this.state === 'paused' ? '已暂停 · 轻点沙漏继续' : '');
+        ui.setHint(this.state === 'paused' ? '已暂停' : '');
+        ui.setActions(this.state === 'paused' ? [{ label: '继续', run: () => this.tap() }, restart] : []);
         ui.showRuler(false);
-        ui.showReset(true);
         break;
       case 'finished':
         ui.setTime('00:00');
         ui.setHint('完成');
+        ui.setActions([
+          {
+            label: '再来一次',
+            run: () => {
+              this.state = 'idle';
+              this.clock = null;
+              this.flipQueued = true;
+            },
+          },
+        ]);
         ui.showRuler(false);
-        ui.showReset(false);
-        if (this.time - this.finishedAt > 4) {
+        if (this.time - this.finishedAt > 6) {
           this.state = 'idle';
           this.clock = null;
         }

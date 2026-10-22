@@ -47,8 +47,6 @@ export function saveSettings(s: Settings) {
 
 const ICON_GEAR =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>';
-const ICON_RESET =
-  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></svg>';
 
 export class Overlay {
   readonly root: HTMLDivElement;
@@ -56,7 +54,8 @@ export class Overlay {
   private hintEl: HTMLDivElement;
   private ruler: HTMLCanvasElement;
   private topEl: HTMLDivElement;
-  private resetBtn: HTMLButtonElement;
+  private actionsEl: HTMLDivElement;
+  private actionsKey = '';
   private panel: HTMLDivElement;
   private veil: HTMLDivElement;
   private idleTimer = 0;
@@ -69,7 +68,6 @@ export class Overlay {
   private lastInt: number;
 
   onMinutes: (m: number) => void = () => {};
-  onReset: () => void = () => {};
   onSettings: (s: Settings) => void = () => {};
 
   constructor(readonly settings: Settings) {
@@ -78,8 +76,8 @@ export class Overlay {
     const root = (this.root = document.createElement('div'));
     root.className = 'hg-ui';
     root.innerHTML = `
-      <div class="hg-top"><button class="hg-btn hidden" data-a="reset" title="重置">${ICON_RESET}</button><button class="hg-btn" data-a="gear" title="设置">${ICON_GEAR}</button></div>
-      <div class="hg-bottom"><div class="hg-time"></div><div class="hg-hint"></div><canvas class="hg-ruler"></canvas></div>
+      <div class="hg-top"><button class="hg-btn" data-a="gear" title="设置">${ICON_GEAR}</button></div>
+      <div class="hg-bottom"><div class="hg-time"></div><div class="hg-hint"></div><div class="hg-actions"></div><canvas class="hg-ruler"></canvas></div>
       <div class="hg-panel hidden"></div>`;
     document.body.appendChild(root);
     this.veil = document.createElement('div');
@@ -89,9 +87,8 @@ export class Overlay {
     this.hintEl = root.querySelector('.hg-hint')!;
     this.ruler = root.querySelector('.hg-ruler')!;
     this.topEl = root.querySelector('.hg-top')!;
-    this.resetBtn = root.querySelector('[data-a=reset]')!;
+    this.actionsEl = root.querySelector('.hg-actions')!;
     this.panel = root.querySelector('.hg-panel')!;
-    this.resetBtn.addEventListener('click', () => this.onReset());
     root.querySelector('[data-a=gear]')!.addEventListener('click', () => this.panel.classList.toggle('hidden'));
     this.buildPanel();
     this.bindRuler();
@@ -103,11 +100,13 @@ export class Overlay {
   poke() {
     this.topEl.classList.remove('hg-fade');
     this.hintEl.classList.remove('hg-fade');
+    this.actionsEl.classList.remove('hg-fade');
     clearTimeout(this.idleTimer);
     this.idleTimer = window.setTimeout(() => {
       if (!this.panel.classList.contains('hidden')) return;
       this.topEl.classList.add('hg-fade');
       this.hintEl.classList.add('hg-fade');
+      this.actionsEl.classList.add('hg-fade');
     }, 4000);
   }
 
@@ -127,8 +126,23 @@ export class Overlay {
     this.ruler.classList.toggle('hidden', !on);
   }
 
-  showReset(on: boolean) {
-    this.resetBtn.classList.toggle('hidden', !on);
+  /** 底部常驻的文字按钮（如"暂停 · 重新开始"）；标签不变时不重建 */
+  setActions(list: Array<{ label: string; run: () => void }>) {
+    const key = list.map((a) => a.label).join('|');
+    if (key === this.actionsKey) return;
+    this.actionsKey = key;
+    this.actionsEl.replaceChildren(
+      ...list.map((a) => {
+        const b = document.createElement('button');
+        b.className = 'hg-act';
+        b.textContent = a.label;
+        b.addEventListener('click', (e) => {
+          e.stopPropagation();
+          a.run();
+        });
+        return b;
+      }),
+    );
   }
 
   /** 离开画面回来补算时盖一层淡淡的幕布 */
@@ -138,6 +152,13 @@ export class Overlay {
 
   get minutes(): number {
     return this.lastInt;
+  }
+
+  /** 直接设定刻度（探测脚本用；等同于用户把刻度尺拖到这里） */
+  setMinutes(m: number) {
+    this.value = m;
+    this.vel = 0;
+    this.emitIfChanged();
   }
 
   private emitIfChanged() {
