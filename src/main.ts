@@ -438,6 +438,34 @@ async function runAppScenario(app: App) {
   w.__result = { ok: true, ...app.debugState };
 }
 
+/** 无头测试：从翻转一直跑到沙流完，检查完成判定和回到调时间状态（不渲染，只跑物理和状态机） */
+async function runFinishScenario(app: App) {
+  const w = window as any;
+  app.renderer.upto = 0;
+  const dt = Number(params.get('dt') ?? 1 / 30);
+  const step = () => app.step(dt);
+  for (let i = 0; i < 20; i++) await step();
+  for (let i = 0; i < 400 && !(app as any).ready(); i++) await step();
+  const total = app.debugState;
+  app.tap();
+  let t = 0;
+  let finishedAt = -1;
+  let idleAt = -1;
+  const target = app.ui.minutes * 60;
+  while (t < target + 60) {
+    await step();
+    t += dt;
+    if (finishedAt < 0 && app.state === 'finished') finishedAt = t;
+    if (finishedAt >= 0 && app.state === 'idle') {
+      idleAt = t;
+      break;
+    }
+    if (Math.round(t / dt) % 300 === 0) console.log(`[finish] t=${t.toFixed(0)}s ${JSON.stringify(app.debugState)}`);
+  }
+  // 翻转动画 1.35 s 期间沙已经开始流，计时从按下那一刻算起
+  w.__result = { target, finishedAt, idleAt, startState: total, end: app.debugState };
+}
+
 async function main() {
   const device = await initGpu();
   if (!device) {
@@ -570,10 +598,16 @@ async function main() {
   else {
     const settings = loadSettings();
     if (params.get('min')) settings.minutes = minutes;
-    const tierRc = { high: 0.75, medium: 1.0, low: 1.25 } as const;
+    // 画质档位：颗粒团半径、最大像素密度、光子数
+    const tiers = {
+      high: { rc: 0.75, maxDpr: 2, photons: 768 },
+      medium: { rc: 1.0, maxDpr: 1.5, photons: 512 },
+      low: { rc: 1.25, maxDpr: 1.25, photons: 384 },
+    } as const;
     const q = settings.quality === 'auto' ? (isMobile ? 'medium' : 'high') : settings.quality;
-    const appRc = params.get('rc') ? rc : tierRc[q] / 1000;
-    const app = new App(device, document.getElementById('view') as HTMLCanvasElement, appRc, settings);
+    const tier = tiers[q];
+    const appRc = params.get('rc') ? rc : tier.rc / 1000;
+    const app = new App(device, document.getElementById('view') as HTMLCanvasElement, appRc, settings, tier);
     (window as any).__app = app;
     if (params.get('scale')) {
       app.renderer.renderScale = Number(params.get('scale'));
@@ -581,7 +615,22 @@ async function main() {
     }
     if (params.get('hud') === '1') attachHud(app, device);
     if (params.get('test') === '1') await runAppScenario(app);
-    else app.start();
+    else if (params.get('test') === 'finish') await runFinishScenario(app);
+    else if (params.get('test') === 'restore') {
+      // 伪造一个 30 s 前存档的会话：2 分钟的沙，已流 30 s，离开 10 s → 恢复后应剩约 80 s
+      const total = sandMassForSeconds(120);
+      localStorage.setItem('hourglass.session.v1', JSON.stringify({ total, drained: W0 * 30, savedAt: Date.now() - 10000, paused: false, angle: Math.PI }));
+      await app.restore();
+      for (let i = 0; i < 6; i++) await app.step(1 / 30);
+      (window as any).__shotRequest = 'restored';
+      (window as any).__shotDone = false;
+      while (!(window as any).__shotDone) await new Promise((r) => setTimeout(r, 100));
+      (window as any).__result = app.debugState;
+    }
+    else {
+      await app.restore();
+      app.start();
+    }
   }
 }
 

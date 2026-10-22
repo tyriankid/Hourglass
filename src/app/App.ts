@@ -6,7 +6,7 @@ import { HourglassMotion } from '../interaction/Motion';
 import { Input } from '../interaction/Input';
 import { RHO_BULK, W0, beverlooRate, clumpMass } from '../physics';
 import { Renderer } from '../render/Renderer';
-import { HIST_BINS, SandSim, defaultParams, type FrameStats } from '../sim/SandSim';
+import { HIST_BINS, SandSim, defaultParams, seedBulb, type FrameStats } from '../sim/SandSim';
 import { Overlay, type Settings } from '../ui/Overlay';
 import { AudioEngine } from '../audio/AudioEngine';
 import type { Vec3 } from '../math/mat4';
@@ -15,6 +15,16 @@ export type State = 'idle' | 'flipping' | 'running' | 'laying' | 'paused' | 'ris
 
 const H = BULB_H;
 const MAX_SAND = W0 * 3600;
+const SESSION_KEY = 'hourglass.session.v1';
+
+/** 计时会话的存档：页面被刷新或被系统回收后据此恢复 */
+interface Session {
+  total: number;
+  drained: number;
+  savedAt: number;
+  paused: boolean;
+  angle: number;
+}
 
 /** 从端盖一侧往瓶颈方向，内腔容积达到 v 时离瓶颈的距离（沙面平铺时的高度） */
 function flatLevelFromNeck(v: number): number {
@@ -63,10 +73,17 @@ export class App {
   autoScale = true;
   onFrame: ((app: App, s: FrameStats | null) => void) | null = null;
 
-  constructor(private device: GPUDevice, canvas: HTMLCanvasElement, readonly rc: number, readonly settings: Settings) {
+  constructor(
+    private device: GPUDevice,
+    canvas: HTMLCanvasElement,
+    readonly rc: number,
+    readonly settings: Settings,
+    tier: { maxDpr: number; photons: number } = { maxDpr: 2, photons: 768 },
+  ) {
     this.sim = new SandSim(device, defaultParams(rc, MAX_SAND));
     this.mc = clumpMass(rc);
-    this.renderer = new Renderer(device, canvas, this.sim);
+    this.renderer = new Renderer(device, canvas, this.sim, tier.photons);
+    this.renderer.maxDpr = tier.maxDpr;
     this.renderer.camera.distance = 0.78;
     this.input = new Input(canvas, this.renderer, this.motion);
     this.ui = new Overlay(settings);
@@ -77,13 +94,97 @@ export class App {
       this.cooldown = Math.min(this.cooldown, 2);
       this.audio.tick();
     };
+    let quality = settings.quality;
     this.ui.onSettings = (s) => {
       this.input.enableGyro(s.gyro);
       this.audio.applySettings(s);
+      // 画质决定颗粒团大小，需要重建物理：保存后刷新
+      if (s.quality !== quality) {
+        quality = s.quality;
+        setTimeout(() => location.reload(), 150);
+      }
     };
-    if (settings.gyro) this.input.enableGyro(true);
+    this.input.onTapBackground = () => this.ui.closePanel();
+    // iOS 只能在用户手势里申请陀螺仪权限：上次开着的话，第一次触摸时再启用
+    if (settings.gyro) window.addEventListener('pointerdown', () => this.input.enableGyro(this.settings.gyro), { once: true });
     this.sim.onStats = (s) => this.onStats(s);
     document.addEventListener('visibilitychange', () => this.onVisibility());
+  }
+
+  /** 恢复上次没走完的计时：按离开时长分配两个泡里的沙，摆好后用真实物理沉降 */
+  async restore(): Promise<boolean> {
+    let sess: Session | null = null;
+    try {
+      sess = JSON.parse(localStorage.getItem(SESSION_KEY) ?? 'null');
+    } catch {
+      sess = null;
+    }
+    if (!sess || !(sess.total > 0)) return false;
+    this.ui.veilOn(true);
+    const away = sess.paused ? 0 : Math.max(0, (Date.now() - sess.savedAt) / 1000);
+    const drained = Math.min(sess.total, sess.drained + W0 * away);
+    const finished = drained >= sess.total - 1;
+    this.uprightAngle = sess.angle;
+    this.motion.angle = finished || !sess.paused ? sess.angle : sess.angle + Math.PI / 2;
+    this.motion.update(0);
+    // 按立着时的朝向分配沙：上泡从瓶颈往上堆，下泡从端盖往上堆；横放的话之后在横放姿态下沉降
+    const topBulb: 1 | -1 = Math.cos(sess.angle) > 0 ? 1 : -1;
+    const parts: Float32Array[] = [];
+    if (sess.total - drained > 0.01) parts.push(seedBulb(this.rc, sess.total - drained, topBulb, topBulb, 3));
+    if (drained > 0.01) parts.push(seedBulb(this.rc, drained, (-topBulb) as 1 | -1, topBulb, 4, 0.6));
+    const all = new Float32Array(parts.reduce((n, p) => n + p.length, 0));
+    let o = 0;
+    for (const p of parts) {
+      all.set(p, o);
+      o += p.length;
+    }
+    this.sim.seed(all);
+    const kin = this.motion.kinematics();
+    for (let i = 0; i < 60; i++) {
+      const e = this.device.createCommandEncoder();
+      this.sim.encodeFrame(e, { wallDt: 1 / 60, substeps: 8, gLocal: kin.gLocal, omega: [0, 0, 0], alpha: [0, 0, 0], flow: false });
+      this.device.queue.submit([e.finish()]);
+      this.sim.afterSubmit();
+      if (i % 10 === 9) await this.sim.flush();
+    }
+    await this.sim.flush();
+    if (finished) {
+      this.clearSession();
+      this.state = 'idle';
+    } else {
+      this.clock = new SandClock(sess.total);
+      this.clock.drained = drained;
+      this.state = sess.paused ? 'paused' : 'running';
+    }
+    this.prev = performance.now();
+    this.ui.veilOn(false);
+    return true;
+  }
+
+  private sessionTimer = 0;
+
+  private saveSession() {
+    if (!this.clock) return;
+    const sess: Session = {
+      total: this.clock.totalMg,
+      drained: this.clock.drained,
+      savedAt: Date.now(),
+      paused: this.state === 'paused' || this.state === 'laying',
+      angle: this.uprightAngle,
+    };
+    try {
+      localStorage.setItem(SESSION_KEY, JSON.stringify(sess));
+    } catch {
+      /* 隐私模式下忽略 */
+    }
+  }
+
+  private clearSession() {
+    try {
+      localStorage.removeItem(SESSION_KEY);
+    } catch {
+      /* 忽略 */
+    }
   }
 
   start() {
@@ -142,6 +243,7 @@ export class App {
       this.sim.dissolve(enc, (up[1] > 0 ? 1 : -1) as 1 | -1, up, -1, true, this.time);
       this.device.queue.submit([enc.finish()]);
       this.clock = null;
+      this.clearSession();
       this.state = 'idle';
       this.cooldown = 12;
     };
@@ -237,6 +339,7 @@ export class App {
   private onVisibility() {
     if (document.hidden) {
       this.hiddenAt = performance.now();
+      if (this.clock && this.state !== 'idle' && this.state !== 'finished') this.saveSession();
       return;
     }
     const gap = (performance.now() - this.hiddenAt) / 1000;
@@ -316,7 +419,8 @@ export class App {
         for (let z = -r; z <= r; z += s) {
           if (x * x + z * z > r * r) continue;
           const h = x * up[0] + y * up[1] + z * up[2];
-          if (h > top + rc * 1.1) pts.push([x, y, z, h]);
+          // 排序键带上离轴距离：正中先堆高，摆成居中的锥形
+          if (h > top + rc * 1.1) pts.push([x, y, z, h + 0.6 * Math.hypot(x, z)]);
         }
     }
     pts.sort((a, b) => a[3] - b[3]);
@@ -389,6 +493,11 @@ export class App {
     this.inFlight++;
     this.device.queue.onSubmittedWorkDone().then(() => this.inFlight--);
     this.updateUi();
+    this.sessionTimer += dt;
+    if (this.sessionTimer > 1 && this.clock && this.state !== 'idle' && this.state !== 'finished') {
+      this.sessionTimer = 0;
+      this.saveSession();
+    }
     this.audio.update(this.lastStats, dt);
     this.onFrame?.(this, this.lastStats);
   }
@@ -431,6 +540,7 @@ export class App {
           this.state = 'finished';
           this.finishedAt = this.time;
           this.audio.chime();
+          this.clearSession();
         }
         break;
       }

@@ -71,7 +71,7 @@ export class Renderer {
   /** 调试：只执行到第几个通道（1 场景 … 7 合成） */
   upto = 99;
 
-  constructor(private device: GPUDevice, private canvas: HTMLCanvasElement, private sim: SandSim) {
+  constructor(private device: GPUDevice, private canvas: HTMLCanvasElement, private sim: SandSim, photons = 768) {
     this.ctx = canvas.getContext('webgpu')!;
     this.format = navigator.gpu.getPreferredCanvasFormat();
     this.ctx.configure({ device, format: this.format, alphaMode: 'opaque' });
@@ -80,7 +80,7 @@ export class Renderer {
     this.profBuf = device.createBuffer({ size: table.byteLength, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(this.profBuf, 0, table);
     this.samp = device.createSampler({ magFilter: 'linear', minFilter: 'linear', addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge' });
-    this.lightMap = new LightMap(device, sim);
+    this.lightMap = new LightMap(device, sim, 256, photons);
     this.glass = this.upload(glassMesh());
     this.caps = this.upload(capsMesh());
     this.buildPipelines();
@@ -370,6 +370,7 @@ export class Renderer {
     const t = this.ensureTargets();
     this.frame++;
     this.writeView(t, time);
+    if (this.upto <= 0) return;
     this.lightMap.encode(encoder, this.model, this.lightDir);
     const P = this.pipes;
     const view = (x: GPUTexture) => x.createView();

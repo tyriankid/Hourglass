@@ -602,9 +602,10 @@ export function interiorSdfCpu(x: number, y: number, z: number): number {
 
 /**
  * 在一个玻璃泡里按重力方向从低到高摆放总质量为 massMg 的颗粒团（带抖动的立方点阵）。
+ * 下泡的沙堆用 coneSlope ≈ 0.6（约休止角）摆成居中的锥形。
  * bulb = +1 为 y > 0 的泡，-1 为 y < 0 的泡；upY 为局部系里"向上"的 y 符号。
  */
-export function seedBulb(rc: number, massMg: number, bulb: 1 | -1, upY: 1 | -1, jitterSeed = 1): Float32Array {
+export function seedBulb(rc: number, massMg: number, bulb: 1 | -1, upY: 1 | -1, jitterSeed = 1, coneSlope = 0): Float32Array {
   const mc = clumpMass(rc);
   const s = 2 * rc * 1.02;
   const pts: number[][] = [];
@@ -626,7 +627,9 @@ export function seedBulb(rc: number, massMg: number, bulb: 1 | -1, upY: 1 | -1, 
       }
     }
   }
-  pts.sort((a, b) => upY * (a[1] - b[1]));
+  // coneSlope > 0 时按"高度 + 坡度 × 离轴距离"排序：正中先堆高，摆出居中的锥形沙堆
+  const key = (p: number[]) => upY * p[1] + coneSlope * Math.hypot(p[0], p[2]);
+  pts.sort((a, b) => key(a) - key(b));
   const out: number[] = [];
   let left = massMg;
   for (const p of pts) {

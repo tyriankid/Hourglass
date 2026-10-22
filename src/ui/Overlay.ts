@@ -111,6 +111,10 @@ export class Overlay {
     }, 4000);
   }
 
+  closePanel() {
+    this.panel.classList.add('hidden');
+  }
+
   setTime(text: string) {
     if (this.timeEl.textContent !== text) this.timeEl.textContent = text;
   }
