@@ -8,6 +8,7 @@ import { RHO_BULK, W0, beverlooRate, clumpMass } from '../physics';
 import { Renderer } from '../render/Renderer';
 import { HIST_BINS, SandSim, defaultParams, type FrameStats } from '../sim/SandSim';
 import { Overlay, type Settings } from '../ui/Overlay';
+import { AudioEngine } from '../audio/AudioEngine';
 import type { Vec3 } from '../math/mat4';
 
 export type State = 'idle' | 'flipping' | 'running' | 'laying' | 'paused' | 'rising' | 'finished';
@@ -35,6 +36,7 @@ export class App {
   readonly motion = new HourglassMotion();
   readonly input: Input;
   readonly ui: Overlay;
+  readonly audio: AudioEngine;
   state: State = 'idle';
   clock: SandClock | null = null;
   /** 应用时间（秒），单调递增，物理和渲染共用；从 1 开始（0 表示"没有凝聚时间"） */
@@ -63,13 +65,16 @@ export class App {
     this.renderer.camera.distance = 0.78;
     this.input = new Input(canvas, this.renderer, this.motion);
     this.ui = new Overlay(settings);
+    this.audio = new AudioEngine(settings);
     this.input.onTapHourglass = () => this.tap();
     this.ui.onReset = () => this.reset();
     this.ui.onMinutes = () => {
       this.cooldown = Math.min(this.cooldown, 2);
+      this.audio.tick();
     };
     this.ui.onSettings = (s) => {
       this.input.enableGyro(s.gyro);
+      this.audio.applySettings(s);
     };
     if (settings.gyro) this.input.enableGyro(true);
     this.sim.onStats = (s) => this.onStats(s);
@@ -371,6 +376,7 @@ export class App {
     this.inFlight++;
     this.device.queue.onSubmittedWorkDone().then(() => this.inFlight--);
     this.updateUi();
+    this.audio.update(this.lastStats, dt);
     this.onFrame?.(this, this.lastStats);
   }
 
@@ -396,6 +402,7 @@ export class App {
         if (this.state === 'running' && (c.done || (c.remainingSeconds < 1 && upMass < 1))) {
           this.state = 'finished';
           this.finishedAt = this.time;
+          this.audio.chime();
         }
         break;
       }

@@ -10,7 +10,10 @@ const T0 = Date.now();
 const log = (m) => console.log(`[run +${((Date.now() - T0) / 1000).toFixed(1)}s] ${m}`);
 // 先打包一份快照再用静态服务跑，测试过程中改代码不会让页面热更新
 const outDir = `.scratch/dist-${process.pid}`;
-await build({ logLevel: 'error', build: { outDir, emptyOutDir: true } });
+await build({
+  logLevel: 'error',
+  build: { outDir, emptyOutDir: true, rollupOptions: process.env.PAGE ? { input: { main: 'index.html', extra: process.env.PAGE } } : undefined },
+});
 const server = await preview({ preview: { port: 0, host: '127.0.0.1' }, build: { outDir }, logLevel: 'error' });
 const url = server.resolvedUrls?.local?.[0];
 log('snapshot served ' + url);
@@ -31,7 +34,7 @@ log('browser launched');
 const page = await browser.newPage({ viewport: { width: 900, height: 1000 } });
 page.on('console', (m) => console.log(`[page:${m.type()}]`, m.text()));
 page.on('pageerror', (e) => console.log('[pageerror]', e.message));
-await page.goto(`${url}?${query}`);
+await page.goto(process.env.PAGE ? `${url}${process.env.PAGE}` : `${url}?${query}`);
 log('page loaded ' + url);
 if (/test=1/.test(query)) {
   // 场景测试：页面请求截图时截图，直到出结果
@@ -57,7 +60,7 @@ if (/test=1/.test(query)) {
   console.log('RESULT', JSON.stringify(await page.evaluate(() => window.__result)));
   await page.waitForTimeout(500);
   if (shot) await page.screenshot({ path: shot });
-} else if (/mode=(drain|compile|bench|inspect|stream)/.test(query)) {
+} else if (/mode=(drain|compile|bench|inspect|stream)/.test(query) || process.env.PAGE) {
   await page.waitForFunction(() => window.__result, null, { timeout: 0, polling: 2000 });
   console.log('RESULT', JSON.stringify(await page.evaluate(() => window.__result), null, 2));
 } else {
