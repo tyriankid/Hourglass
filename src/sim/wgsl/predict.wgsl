@@ -21,4 +21,6 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   var np = p.xyz + v * dt;
   if (p.y * np.y < 0.0) { np.y = p.y; } // 颗粒团过不了 1 mm 的瓶颈，沙只能以沙粒形式穿过孔口
   predOut[i] = vec4f(np, p.w);
+  // 记下"求解前"的速度，收尾时用它限制接触修正带来的动能
+  vel[i] = vec4f(v, vel[i].w);
 }

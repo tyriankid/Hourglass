@@ -67,6 +67,8 @@ export class App {
   private inFlight = 0;
   private lastStats: FrameStats | null = null;
   private prevG: number[] | null = null;
+  lastWake = false;
+  lastKin: unknown = null;
   /** 帧时间的指数平均（ms），用于自适应分辨率和性能面板 */
   frameMs = 16.7;
   substepsUsed = 8;
@@ -492,6 +494,8 @@ export class App {
     const gTurn = prevG ? Math.acos(Math.min(1, (prevG[0] * kin.gLocal[0] + prevG[1] * kin.gLocal[1] + prevG[2] * kin.gLocal[2]) / (gl * Math.hypot(...prevG)))) : 0;
     this.prevG = [...kin.gLocal];
     const wakeAll = w > 0.02 || al > 0.3 || Math.abs(gl - 9.81) > 0.08 || gTurn > 0.0015;
+    this.lastWake = wakeAll;
+    this.lastKin = { w: +w.toFixed(4), al: +al.toFixed(3), gl: +gl.toFixed(4), gTurn: +gTurn.toFixed(5), g: kin.gLocal.map((x) => +x.toFixed(3)) };
     const enc = this.device.createCommandEncoder();
     if (this.state === 'idle') {
       this.controller(enc);

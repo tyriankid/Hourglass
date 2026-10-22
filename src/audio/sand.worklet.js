@@ -2,7 +2,7 @@
 // bed    连续沙沙底噪的增益（流量大时颗粒声密到连成一片）
 // clicks 可分辨的颗粒噼啪声的速率（次/秒）；clickAmp 其振幅
 // glass  沙粒撞玻璃的叮声速率（次/秒）
-// slide  沙体整体滑动（翻转、倾斜）的低沉沙沙声增益
+// slide  沙体成片滑动（翻转、倾斜、凝聚落沙）的柔和沙沙声增益
 
 class SandProcessor extends AudioWorkletProcessor {
   static get parameterDescriptors() {
@@ -29,6 +29,7 @@ class SandProcessor extends AudioWorkletProcessor {
     this.flutter = 1;
     this.flutterT = 1;
     this.slideLp = [0, 0, 0, 0];
+    this.slideBp = [0, 0];
   }
 
   rand() {
@@ -62,7 +63,9 @@ class SandProcessor extends AudioWorkletProcessor {
     const kHp = Math.exp((-2 * Math.PI * 900) / sr);
     const kLp = 1 - Math.exp((-2 * Math.PI * 7000) / sr);
     const kLp2 = 1 - Math.exp((-2 * Math.PI * 5200) / sr);
-    const kSl = 1 - Math.exp((-2 * Math.PI * 260) / sr);
+    // 滑动声：0.9–3.5 kHz 的带通噪声（真实的沙体滑落是柔和的中高频沙沙声，不是低沉的隆隆声）
+    const kSlHp = Math.exp((-2 * Math.PI * 900) / sr);
+    const kSlLp = 1 - Math.exp((-2 * Math.PI * 3500) / sr);
     for (let i = 0; i < n; i++) {
       // 颗粒噼啪声：泊松过程
       if (clickRate > 0) {
@@ -112,17 +115,19 @@ class SandProcessor extends AudioWorkletProcessor {
         if (c === 0) bl = b;
         else br = b;
       }
-      // 滑动：低沉的布朗噪声
+      // 滑动：带通噪声，跟着底噪的"呼吸"起伏
       let sl = 0;
       let sr2 = 0;
       if (slide > 0) {
         for (let c = 0; c < 2; c++) {
           const w = this.rand() * 2 - 1;
-          this.slideLp[c] += (w - this.slideLp[c]) * kSl;
-          this.slideLp[c + 2] += (this.slideLp[c] - this.slideLp[c + 2]) * kSl;
+          const h = kSlHp * (this.slideLp[c] + w - this.slideLp[c + 2]);
+          this.slideLp[c + 2] = w;
+          this.slideLp[c] = h;
         }
-        sl = this.slideLp[2] * slide * 6;
-        sr2 = this.slideLp[3] * slide * 6;
+        for (let c = 0; c < 2; c++) this.slideBp[c] += (this.slideLp[c] - this.slideBp[c]) * kSlLp;
+        sl = this.slideBp[0] * slide * 1.6 * this.flutter;
+        sr2 = this.slideBp[1] * slide * 1.6 * this.flutter;
       }
       L[i] = bl + vl + sl;
       R[i] = br + vr + sr2;

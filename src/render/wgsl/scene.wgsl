@@ -4,6 +4,7 @@
 @group(0) @binding(1) var<uniform> P: Profile;
 @group(0) @binding(2) var lightMap: texture_2d<f32>;
 @group(0) @binding(3) var linSamp: sampler;
+@group(0) @binding(4) var lightMapPrev: texture_2d<f32>;
 
 struct FsOut {
   @builtin(position) pos: vec4f,
@@ -54,7 +55,10 @@ fn fsBackdrop(i: FsOut) -> SceneOut {
     // 桌面：环境光 + 主光，阴影和焦散来自光照贴图
     let lmUv = p.xz / (2.0 * LIGHTMAP_HALF) + 0.5;
     var lm = vec4f(1.0, 0.0, 0.0, 0.0);
-    if (all(lmUv > vec2f(0.0)) && all(lmUv < vec2f(1.0))) { lm = textureSampleLevel(lightMap, linSamp, lmUv, 0.0); }
+    // 新一轮光照贴图在 0.3 s 内从旧结果过渡过来（V.misc.w），阴影不会突变
+    if (all(lmUv > vec2f(0.0)) && all(lmUv < vec2f(1.0))) {
+      lm = mix(textureSampleLevel(lightMapPrev, linSamp, lmUv, 0.0), textureSampleLevel(lightMap, linSamp, lmUv, 0.0), V.misc.w);
+    }
     let albedo = vec3f(0.80, 0.785, 0.765);
     let L = normalize(V.light.xyz);
     let direct = max(L.y, 0.0) * V.light.w * lm.x;

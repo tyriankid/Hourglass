@@ -21,7 +21,20 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_ind
       var d = np - x0.xyz;
       if (length(d) < U.fric.w * dt) { np = x0.xyz; d = vec3f(0.0); }
       var v = d / dt * U.lim.w;
-      let sp = length(v);
+      // 沙是无弹性、强耗能的：接触修正只能让颗粒停下或改变方向，不能让它比求解前更快
+      // （否则整堆沙挤进收窄的瓶颈时会被"挤飞"成射流）。位置修正保留，只是不变成动能。
+      let vp = vel[i].xyz;
+      // 竖直方向完全非弹性：修正不能让颗粒获得比求解前更大的"向上"（反重力）速度——没有反弹
+      let upd = -gravityDir();
+      let vu = dot(v, upd);
+      let vuMax = max(dot(vp, upd), 0.0) + 0.02;
+      if (vu > vuMax) { v -= (vu - vuMax) * upd; }
+      let vmaxC = length(vp) + 0.02;
+      var sp = length(v);
+      if (sp > vmaxC) {
+        v *= vmaxC / sp;
+        sp = vmaxC;
+      }
       if (sp > U.lim.x) { v *= U.lim.x / sp; }
       pos[i] = vec4f(np, x0.w);
       vel[i] = vec4f(v, vel[i].w);

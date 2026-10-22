@@ -11,7 +11,7 @@ struct View {
   screen: vec4f,      // 宽, 高, 1/宽, 1/高
   sim: vec4f,         // rc, mc, 沙粒半径, 单位深度上一个像素的世界尺寸
   light: vec4f,       // 指向主光的世界方向, 强度
-  misc: vec4f,        // 时间, 帧号, 曝光, 0
+  misc: vec4f,        // 时间, 帧号, 曝光, 光照贴图新旧过渡系数
 }
 
 struct Profile { s: array<vec4f, 130> }

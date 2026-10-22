@@ -28,6 +28,7 @@ import fxStepSrc from './wgsl/fx_step.wgsl?raw';
 import sleepSrc from './wgsl/sleep.wgsl?raw';
 import solveGsSrc from './wgsl/solve_gs.wgsl?raw';
 import wakeSrc from './wgsl/wake.wgsl?raw';
+import prestabSrc from './wgsl/prestab.wgsl?raw';
 
 export interface SimParams {
   /** 颗粒团标称半径（m） */
@@ -50,6 +51,8 @@ export interface SimParams {
   average: boolean;
   /** 求解器：'gs' 按网格着色的 Gauss-Seidel；'jacobi' 旧的 Jacobi */
   solver: 'gs' | 'jacobi';
+  /** 每个子步开始前做预稳定（只在位置上推开已有重叠） */
+  prestab: boolean;
   vmax: number;
   /** 诊断用：每个子步对颗粒团速度乘的系数（1 = 不阻尼） */
   damp: number;
@@ -74,6 +77,7 @@ export function defaultParams(rc: number, maxSandMg: number): SimParams {
     sor: 1.0,
     average: false,
     solver: 'gs',
+    prestab: true,
     vmax: 2.0,
     damp: 1.0,
     grainSettleV: 0.04,
@@ -225,7 +229,7 @@ export class SandSim {
     const u32r = (name: string, kind: 'read' | 'rw' = 'read'): BindSpec => ({ name, kind, type: 'array<u32>' });
     const parts = (body: string, extra = '') => ({ types: typesSrc, fns: fnsSrc + '\n' + extra, body });
     const K = this.kernels;
-    K.predict = makeKernel(d, 'predict', parts(predictSrc), [U, P, v4('pos', 'rw'), v4('vel', 'read'), v4('predOut', 'rw'), atom('pend'), v4('rest', 'rw')]);
+    K.predict = makeKernel(d, 'predict', parts(predictSrc), [U, P, v4('pos', 'rw'), v4('vel', 'rw'), v4('predOut', 'rw'), atom('pend'), v4('rest', 'rw')]);
     K.gridClear = makeKernel(d, 'gridClear', parts(gridClearSrc), [U, P, atom('grid')]);
     K.gridInsert = makeKernel(d, 'gridInsert', parts(gridInsertSrc), [U, P, v4('pred', 'read'), atom('grid'), atom('ctl')]);
     K.sink = makeKernel(d, 'sink', parts(sinkSrc), [U, P, v4('pos', 'rw'), v4('pred', 'rw'), atom('ctl'), u32r('freeStack', 'rw')]);
@@ -234,6 +238,8 @@ export class SandSim {
     K.solveFirst = makeKernel(d, 'solveFirst', parts(solveSrc), solveSpecs, { FIRST: 1 });
     const gsSpecs = [U, P, v4('pos', 'read'), v4('pred', 'rw'), u32r('grid'), v4('rest', 'read')];
     for (let c = 0; c < 8; c++) K['gs' + c] = makeKernel(d, 'gs' + c, parts(solveGsSrc), gsSpecs, { COLOR: c });
+    const psSpecs = [U, P, v4('pos', 'rw'), u32r('grid'), v4('rest', 'read')];
+    for (let c = 0; c < 8; c++) K['ps' + c] = makeKernel(d, 'ps' + c, parts(prestabSrc), psSpecs, { COLOR: c });
     K.wake = makeKernel(d, 'wake', parts(wakeSrc), [U, P, v4('vel', 'read'), v4('pred', 'read'), u32r('grid'), v4('rest', 'rw')]);
     K.finalize = makeKernel(d, 'finalize', parts(finalizeSrc), [U, P, v4('pos', 'rw'), v4('vel', 'rw'), v4('pred', 'read'), atom('ctl'), v4('rest', 'rw')]);
     K.sleep = makeKernel(d, 'sleep', parts(sleepSrc), [U, P, v4('pos', 'read'), v4('vel', 'rw'), v4('rest', 'rw')]);
@@ -265,6 +271,7 @@ export class SandSim {
     bg.sink = bindKernel(d, K.sink, { ...base, pos: B.pos, pred: B.predA, ctl: B.ctl, freeStack: B.freeStack });
     bg.solveAB = bindKernel(d, K.solve, { ...base, pos: B.pos, predIn: B.predA, predOut: B.predB, grid: B.grid, rest: B.rest });
     bg.solveBA = bindKernel(d, K.solve, { ...base, pos: B.pos, predIn: B.predB, predOut: B.predA, grid: B.grid, rest: B.rest });
+    for (let c = 0; c < 8; c++) bg['ps' + c] = bindKernel(d, K['ps' + c], { ...base, pos: B.pos, grid: B.grid, rest: B.rest });
     for (let c = 0; c < 8; c++) bg['gs' + c] = bindKernel(d, K['gs' + c], { ...base, pos: B.pos, pred: B.predA, grid: B.grid, rest: B.rest });
     bg.wake = bindKernel(d, K.wake, { ...base, vel: B.vel, pred: B.predA, grid: B.grid, rest: B.rest });
     bg.solveFirst = bindKernel(d, K.solveFirst, { ...base, pos: B.pos, predIn: B.predA, predOut: B.predB, grid: B.grid, rest: B.rest });
@@ -400,8 +407,11 @@ export class SandSim {
       pass.dispatchWorkgroups(groups(n));
     };
     const nSub = Math.min(f.substeps, MAX_SUBSTEPS);
+    const half = Math.ceil(this.dims[0] / 2) * Math.ceil(this.dims[1] / 2) * Math.ceil(this.dims[2] / 2);
     for (let s = 0; s < nSub; s++) {
       slot = s;
+      // 预稳定：在当前位置上推开已有的重叠（用上一子步建好的网格），不产生速度
+      if (this.p.solver === 'gs' && this.p.prestab) for (let c = 0; c < 8; c++) run('ps' + c, 'ps' + c, half);
       run('predict', 'predict', cap);
       run('gridClear', 'gridClear', this.nCells);
       run('gridInsert', 'gridInsert', cap);
@@ -411,7 +421,6 @@ export class SandSim {
       let inA = true;
       if (this.p.solver === 'gs') {
         run('wake', 'wake', cap);
-        const half = Math.ceil(this.dims[0] / 2) * Math.ceil(this.dims[1] / 2) * Math.ceil(this.dims[2] / 2);
         for (let it = 0; it < this.p.iterations; it++) for (let c = 0; c < 8; c++) run('gs' + c, 'gs' + c, half);
       } else {
         for (let it = 0; it < this.p.iterations; it++) {

@@ -19,7 +19,8 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   let iy = cell / (nxl * nxl);
   if (iy >= nyl) { return; }
   var seed = pcg(cell * 7919u + u32(O.b.x));
-  let jit = (vec3f(rnd(&seed), rnd(&seed), rnd(&seed)) - 0.5) * 0.1 * rc;
+  // 在格子内水平随机偏移约 ±0.4 格距：否则同一列上的颗粒会笔直摞成"柱子"
+  let jit = (vec3f(rnd(&seed), rnd(&seed) * 0.25, rnd(&seed)) - vec3f(0.5, 0.125, 0.5)) * vec3f(0.8 * sp, 0.2 * rc, 0.8 * sp);
   let p = vec3f(-rmax + (f32(ix) + 0.5) * sp, ylo + (f32(iy) + 0.5) * sp, -rmax + (f32(iz) + 0.5) * sp) + jit;
   let pr = profileAt(abs(p.y) / bulbH());
   if (length(p.xz) > pr.x - rc * 1.3 || abs(p.y) > bulbH() - rc * 1.2) { return; }
@@ -48,7 +49,9 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   let j = freeStack[t - 1u];
   pos[j] = vec4f(p, O.b.w);
   rest[j] = vec4f(p, 0.0);
-  vel[j] = vec4f(0.0, 0.0, 0.0, select(0.0, O.b.y, O.b.z > 0.0));
+  // 一点随机的水平初速度，落地时自然散开、滚落成锥形
+  let lv = (vec3f(rnd(&seed), 0.0, rnd(&seed)) - vec3f(0.5, 0.0, 0.5)) * 0.06;
+  vel[j] = vec4f(lv, select(0.0, O.b.y, O.b.z > 0.0));
   atomicAdd(&ctl[C_CONDENSED], u32(round(O.b.w * 1000.0)));
   if (O.b.z > 0.0) {
     let dir = normalize(vec3f(rnd(&seed), rnd(&seed), rnd(&seed)) - 0.5);

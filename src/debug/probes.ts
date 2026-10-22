@@ -153,7 +153,52 @@ export async function runProbe(app: App, name: string, params: URLSearchParams) 
   };
 
   const result: Record<string, unknown> = {};
-  if (name === 'film-rest') {
+  if (name === 'spray-run') {
+    // 翻转后逐帧统计沿局部"向上"方向飞的颗粒团
+    await waitReady(25);
+    app.tap();
+    const t0 = t;
+    while (t - t0 < Number(params.get('secs') ?? 5)) {
+      await step();
+      const st = await app.sim.readState();
+      const vb = await (async () => {
+        const d = (app as any).device as GPUDevice;
+        const b = d.createBuffer({ size: app.sim.buf.vel.size, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+        const e = d.createCommandEncoder();
+        e.copyBufferToBuffer(app.sim.buf.vel, 0, b, 0, app.sim.buf.vel.size);
+        d.queue.submit([e.finish()]);
+        await b.mapAsync(GPUMapMode.READ);
+        const o = new Float32Array(b.getMappedRange().slice(0));
+        b.unmap();
+        b.destroy();
+        return o;
+      })();
+      const up = app.motion.localUp();
+      let n = 0;
+      let mx = 0;
+      let where = '';
+      let awake = 0;
+      for (let i = 0; i < st.pos.length / 4; i++) {
+        if (st.pos[i * 4 + 3] <= 0) continue;
+        if (st.rest[i * 4 + 3] >= 0) awake++;
+        const vu = vb[i * 4] * up[0] + vb[i * 4 + 1] * up[1] + vb[i * 4 + 2] * up[2];
+        if (vu > 0.05) n++;
+        if (vu > mx) {
+          mx = vu;
+          const h = st.pos[i * 4] * up[0] + st.pos[i * 4 + 1] * up[1] + st.pos[i * 4 + 2] * up[2];
+          where = `h=${(h * 1000).toFixed(1)} r=${(Math.hypot(st.pos[i * 4], st.pos[i * 4 + 2]) * 1000).toFixed(1)} m=${(st.pos[i * 4 + 3] / app.sim.mc).toFixed(2)} rest=${st.rest[i * 4 + 3].toFixed(0)}`;
+        }
+      }
+      log("spray", { state: app.state, awake, upFlyers: n, maxUp_mm_s: +(mx * 1000).toFixed(0), where, wake: (app as any).lastWake, kin: (app as any).lastKin });
+    }
+  } else if (name === 'film-run') {
+    // 计时中：翻转后让沙流几秒，再连续渲染，看上泡哪里在动
+    await waitReady(25);
+    app.tap();
+    while (app.state !== 'running') await step();
+    for (let i = 0; i < Number(params.get('runf') ?? 180); i++) await step();
+    await filmFrames('run', Number(params.get('n') ?? 30));
+  } else if (name === 'film-rest') {
     // 静置的沙堆：渲染连续帧，看画面是否完全不动
     await waitReady(25);
     for (let i = 0; i < Number(params.get('rest') ?? 240); i++) await step();

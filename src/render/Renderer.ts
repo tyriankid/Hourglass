@@ -249,6 +249,7 @@ export class Renderer {
       [
         { binding: 2, resource: this.lightMap.tex.createView() },
         { binding: 3, resource: this.samp },
+        { binding: 4, resource: this.lightMap.prevTex.createView() },
       ],
       true,
     );
@@ -362,7 +363,7 @@ export class Renderer {
     const l = this.lightDir;
     const ll = Math.hypot(l[0], l[1], l[2]);
     data.set([l[0] / ll, l[1] / ll, l[2] / ll, this.lightIntensity], 108);
-    data.set([time, this.frame, this.exposure, 0], 112);
+    data.set([time, this.frame, this.exposure, this.lightMap.fade(time)], 112);
     this.device.queue.writeBuffer(this.viewBuf, 0, data);
   }
 
@@ -371,7 +372,7 @@ export class Renderer {
     this.frame++;
     this.writeView(t, time);
     if (this.upto <= 0) return;
-    this.lightMap.encode(encoder, this.model, this.lightDir);
+    this.lightMap.encode(encoder, this.model, this.lightDir, time);
     const P = this.pipes;
     const view = (x: GPUTexture) => x.createView();
 

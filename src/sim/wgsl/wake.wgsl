@@ -9,9 +9,13 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   let up = -gravityDir();
   let cc = cellOf(p.xyz);
   let nc = nCells();
-    // 唤醒检查：下方有没有紧贴的支撑（颗粒团或玻璃），有没有被醒着的邻居明显压入
-    var supported = false;
+    // 唤醒检查：静摩擦能不能托住它。
+    // 单个接触：法线与竖直方向的夹角要在静摩擦角（约 29°）以内；
+    // 多个接触：它们的水平方向要分布在两侧把颗粒"托住"（贴玻璃壁 + 另一侧有邻居，也算托住）。
     var pushed = false;
+    var maxDot = 0.0;
+    var nBelow = 0.0;
+    var hsum = vec3f(0.0);
     for (var dz = -1; dz <= 1; dz++) {
       for (var dy = -1; dy <= 1; dy++) {
         for (var dx = -1; dx <= 1; dx++) {
@@ -27,10 +31,17 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
             let dist = length(d);
             let rr = ri + clumpRadius(q.w);
             if (dist < 1e-9) { continue; }
-            let below = dist - rr < 0.1 * ri && dot(d / dist, up) > 0.25;
-            if (below) { supported = true; }
-            // 身下的支撑正在往下走（漏斗流的中心通道在流）：跟着塌落
-            if (below && rest[j].w >= 0.0 && dot(vel[j].xyz, up) < -0.01) { pushed = true; }
+            let n = d / dist;
+            let du = dot(n, up);
+            let touching = dist - rr < 0.1 * ri;
+            if (touching && du > 0.2) {
+              maxDot = max(maxDot, du);
+              nBelow += 1.0;
+              let h = n - du * up;
+              if (length(h) > 1e-6) { hsum += normalize(h); }
+              // 身下的支撑正在往下走（漏斗流的中心通道在流）：跟着塌落
+              if (rest[j].w >= 0.0 && dot(vel[j].xyz, up) < -0.01) { pushed = true; }
+            }
             // 被"正在运动"的邻居压过来才算：用邻居上一子步求解后的实际速度判断
             // （不能用预测位移，重力一项 g·dt² 就恰好等于 2 cm/s × dt）
             if (rest[j].w >= 0.0 && rr - dist > 0.02 * rr && length(vel[j].xyz) > 0.02) { pushed = true; }
@@ -38,8 +49,17 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
         }
       }
     }
-    // 玻璃壁只有接近水平时才托得住（沙与玻璃的摩擦角约 17°）；陡峭的锥壁上沙会滑下去
+    // 玻璃壁：作为一个接触参与判断（与沙的摩擦角约 17°，单独托住要求接近水平）
     let swk = interiorSdf(p.xyz);
-    if (swk.x - ri < 0.1 * ri && dot(swk.yzw, up) > 0.95) { supported = true; }
+    if (swk.x - ri < 0.1 * ri) {
+      let du = dot(swk.yzw, up);
+      if (du > 0.95) { maxDot = 1.0; }
+      if (du > -0.2) {
+        nBelow += 1.0;
+        let h = swk.yzw - du * up;
+        if (length(h) > 1e-6) { hsum += normalize(h); }
+      }
+    }
+    let supported = maxDot > 0.87 || (nBelow >= 2.0 && length(hsum) < 0.7 * nBelow);
     if (!(supported && !pushed)) { rest[i] = vec4f(p.xyz, 0.0); }
 }

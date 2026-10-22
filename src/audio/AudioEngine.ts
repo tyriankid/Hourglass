@@ -40,7 +40,7 @@ export function sandVoice(stats: Pick<FrameStats, 'impactsSand' | 'impactSpeedSu
   return {
     bed: Math.min(0.12, 1.3e-4 * Math.sqrt(energy)),
     clicks: Math.min(1400, impacts * 0.02),
-    amp: Math.min(0.3, 0.2 * Math.min(1, speed / 1.2) + 0.05),
+    amp: Math.min(0.15, 0.1 * Math.min(1, speed / 1.2) + 0.03),
     glass: Math.min(200, (stats.impactsGlass / fdt) * 0.05),
     slide: Math.min(0.16, Math.max(0, (stats.moving - 40) / 1500) * 0.16),
   };

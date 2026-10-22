@@ -556,6 +556,26 @@ async function main() {
     (window as any).__result = { ok: true };
     return;
   }
+  if (mode === 'onefall') {
+    // 最小实验：空中放一颗颗粒团，给定重力方向，看它往哪掉
+    const sim = new SandSim(device, defaultParams(rc, sandMassForSeconds(600)));
+    const gy = Number(params.get('gy') ?? -1);
+    const y0 = Number(params.get('y0') ?? -0.04);
+    sim.seed(new Float32Array([0.0, y0, 0.0, sim.mc]));
+    const out: string[] = [];
+    for (let f = 0; f < 6; f++) {
+      const enc = device.createCommandEncoder();
+      sim.encodeFrame(enc, { wallDt: 1 / 60, substeps: 8, gLocal: [0, gy * G0, 0], omega: [0, 0, 0], alpha: [0, 0, 0], flow: false });
+      device.queue.submit([enc.finish()]);
+      sim.afterSubmit();
+      await sim.flush();
+      const st = await sim.readState();
+      out.push((st.pos[1] * 1000).toFixed(3));
+    }
+    console.log(`[onefall] gy=${gy} y0=${y0 * 1000}mm → y(mm) 每帧: ${out.join(' ')}`);
+    (window as any).__result = { out };
+    return;
+  }
   if (mode === 'restpile') {
     // 下泡摆好 min 分钟的锥形沙堆，沉降 settle 帧后逐帧测量：位移分布、休眠比例
     const rp = defaultParams(rc, sandMassForSeconds(3600));
@@ -622,19 +642,56 @@ async function main() {
     // 瓶颈现场：沙在上泡，沉降 1 s 后开孔口流 3 s，列出离孔口最近的颗粒团
     const sp = defaultParams(rc, sandMassForSeconds(3600));
     if (params.get('solver')) (sp as any).solver = params.get('solver');
+    if (params.get('prestab')) sp.prestab = params.get('prestab') === '1';
+    if (params.get('shock')) sp.shockK = Number(params.get('shock'));
     const sim = new SandSim(device, sp);
-    sim.seed(seedBulb(rc, sandMassForSeconds(minutes * 60), 1, 1, Number(params.get('seedn') ?? 5)));
+    // ?flipg=1：整个场景上下颠倒（沙在 -y 泡、重力朝 +y），检查方向不对称的问题
+    const gs = params.get('flipg') === '1' ? -1 : 1;
+    sim.seed(seedBulb(rc, sandMassForSeconds(minutes * 60), gs as 1 | -1, gs as 1 | -1, Number(params.get('seedn') ?? 5)));
     let drained = 0;
     sim.onStats = (s) => (drained += s.drained);
     const settleF = Number(params.get('settle') ?? 60);
     const flowF = Number(params.get('flowf') ?? 180);
     for (let f = 0; f < settleF + flowF; f++) {
       const enc = device.createCommandEncoder();
-      sim.encodeFrame(enc, { wallDt: 1 / 60, substeps: 8, gLocal: [0, -G0, 0], omega: [0, 0, 0], alpha: [0, 0, 0], flow: f >= settleF });
+      sim.encodeFrame(enc, { wallDt: 1 / 60, substeps: 8, gLocal: [0, -G0 * gs, 0], omega: [0, 0, 0], alpha: [0, 0, 0], flow: f >= settleF });
       device.queue.submit([enc.finish()]);
       sim.afterSubmit();
       await sim.flush();
       if (f % 30 === 29) console.log(`[neck] f=${f} drained=${drained.toFixed(2)} mg`);
+      const sprayFrom = Number(params.get('sprayfrom') ?? 0);
+      if (params.get('spray') && (f % 10 === 9 || f < 10 || (f >= sprayFrom && f < sprayFrom + 24))) {
+        // 向上飞的颗粒团：速度 y 分量 > 5 cm/s
+        const st = await sim.readState();
+        const vb = device.createBuffer({ size: sim.buf.vel.size, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+        const e = device.createCommandEncoder();
+        e.copyBufferToBuffer(sim.buf.vel, 0, vb, 0, sim.buf.vel.size);
+        device.queue.submit([e.finish()]);
+        await vb.mapAsync(GPUMapMode.READ);
+        const vv = new Float32Array(vb.getMappedRange().slice(0));
+        vb.unmap();
+        vb.destroy();
+        let up = 0;
+        let maxUp = 0;
+        let where = '';
+        let awake = 0;
+        let down = 0;
+        for (let i = 0; i < sim.p.clumpCap; i++) {
+          if (st.pos[i * 4 + 3] <= 0) continue;
+          if (st.rest[i * 4 + 3] >= 0) awake++;
+          if (vv[i * 4 + 1] < -0.05) down++;
+        }
+        for (let i = 0; i < sim.p.clumpCap; i++) {
+          if (st.pos[i * 4 + 3] <= 0) continue;
+          const vy = vv[i * 4 + 1] * gs;
+          if (vy > 0.05) up++;
+          if (vy > maxUp) {
+            maxUp = vy;
+            where = `y=${(st.pos[i * 4 + 1] * 1000).toFixed(1)} r=${(Math.hypot(st.pos[i * 4], st.pos[i * 4 + 2]) * 1000).toFixed(1)} m=${(st.pos[i * 4 + 3] / sim.mc).toFixed(2)} rest=${st.rest[i * 4 + 3].toFixed(0)}`;
+          }
+        }
+        console.log(`[spray] f=${f + 1} 醒着 ${awake} 下落(>5cm/s) ${down} 上飞 ${up} 个，最快 ${(maxUp * 1000).toFixed(0)} mm/s @ ${where}`);
+      }
     }
     const st = await sim.readState();
     const vel = await (async () => {
