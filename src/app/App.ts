@@ -458,7 +458,8 @@ export class App {
     }
     const dt = Math.min(wallDt, 0.05);
     this.time += dt;
-    if (wallDt > 0 && wallDt < 0.5) this.frameMs += (wallDt * 1000 - this.frameMs) * 0.05;
+    // 慢帧也计入（最多按 1 s 算），性能面板和自适应分辨率才能如实反映掉帧
+    if (wallDt > 0) this.frameMs += (Math.min(wallDt, 1) * 1000 - this.frameMs) * 0.1;
     this.adaptScale(dt);
     this.ui.update(dt);
     this.input.update(dt);
