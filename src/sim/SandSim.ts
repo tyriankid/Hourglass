@@ -70,7 +70,7 @@ export function defaultParams(rc: number, maxSandMg: number): SimParams {
     muK: 0.45,
     muWall: 0.3,
     sleepV: 1.0e-3,
-    shockK: 300,
+    shockK: 1500,
     sor: 1.0,
     average: false,
     solver: 'gs',

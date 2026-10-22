@@ -14,7 +14,6 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   let ri = clumpRadius(p.w);
   let up = -gravityDir();
   let k = U.misc.x;
-  let mi = p.w * exp(-k * dot(p.xyz, up));
   let cc = cellOf(p.xyz);
   let nc = nCells();
   var asleep = rest[i].w < 0.0;
@@ -70,9 +69,10 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
           let dist = sqrt(d2);
           let nrm = d / dist;
           let pen = rr - dist;
-          let mj = q.w * exp(-k * dot(q.xyz, up));
-          // 休眠的邻居不可移动：修正全部由自己承担
-          let w = select(mj / (mi + mj), 1.0, rest[j].w < 0.0);
+          // shock propagation 的质量比只取决于两者的高度差：w = mj/(mi+mj) = 1/(1 + (m_i/m_j)·e^{-k(h_i-h_j)})，
+          // 指数截断防溢出；休眠的邻居不可移动，修正全部由自己承担
+          let ex = clamp(-k * dot(p.xyz - q.xyz, up), -30.0, 30.0);
+          let w = select(1.0 / (1.0 + (p.w / q.w) * exp(ex)), 1.0, rest[j].w < 0.0);
           dsum += w * pen * nrm;
           let dp = (p.xyz - x0) - (q.xyz - pos[j].xyz);
           let dt = dp - dot(dp, nrm) * nrm;

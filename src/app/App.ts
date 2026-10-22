@@ -303,8 +303,9 @@ export class App {
       const near = 0.07 * H;
       const lo = far > near + 0.008 ? near : 0.04 * H;
       const hi = far > near + 0.008 ? far : 0.14 * H;
-      // 每帧一小批：60 分钟的沙约 3 秒凝聚完
-      const perFrame = Math.max(30, Math.ceil(MAX_SAND / this.mc / 180));
+      // 每帧一小批，像一阵柔和的沙雨：60 分钟约 6–8 秒、25 分钟约 3 秒。
+      // 点阵里有不少格点落在区域外或已被占用会被跳过，所以请求量取实际需要的 3 倍
+      const perFrame = Math.max(40, Math.ceil((MAX_SAND / this.mc / 400) * 3));
       let count: number;
       let massEach: number;
       if (diff < this.mc) {
@@ -315,7 +316,9 @@ export class App {
         massEach = this.mc;
       }
       this.sim.condense(enc, { y0: s * lo, y1: s * hi, bulb: s, count, massEach, glow: true, time: this.time, up });
-      this.pendingSpawn.push({ frame: this.sim.nextFrame, mg: count * massEach });
+      // 在途量：离目标还远时按请求量的 1/3 估计（有格点会被跳过）；接近目标时按全额记，绝不超量。统计读回后以实测为准
+      const requested = count * massEach;
+      this.pendingSpawn.push({ frame: this.sim.nextFrame, mg: diff > 3 * requested ? requested / 3 : requested });
     } else if (diff < -1 && inflight === 0) {
       // 多了：读高度直方图，从顶层往下消散刚好够的量
       this.histBusy = true;

@@ -11,7 +11,6 @@ fn solveOne(i: u32) {
   let ri = clumpRadius(p0.w);
   let up = -gravityDir();
   let k = U.misc.x;
-  let mi = p0.w * exp(-k * dot(p0.xyz, up));
   let cc = cellOf(p0.xyz);
   let nc = nCells();
   // 瓶颈附近的流动区：真实细沙在这里处于剪切、松散的流动态，有效摩擦远低于静止沙堆（μ(I) 流变）。
@@ -40,9 +39,10 @@ fn solveOne(i: u32) {
           let dist = sqrt(d2);
           let nrm = d / dist;
           let pen = rr - dist;
-          let mj = q.w * exp(-k * dot(q.xyz, up));
-          // 休眠的邻居不可移动：修正全部由自己承担
-          let w = select(mj / (mi + mj), 1.0, rest[j].w < 0.0);
+          // shock propagation 的质量比只取决于两者的高度差：w = mj/(mi+mj) = 1/(1 + (m_i/m_j)·e^{-k(h_i-h_j)})，
+          // 指数截断防溢出；休眠的邻居不可移动，修正全部由自己承担
+          let ex = clamp(-k * dot(p - q.xyz, up), -30.0, 30.0);
+          let w = select(1.0 / (1.0 + (p0.w / q.w) * exp(ex)), 1.0, rest[j].w < 0.0);
           dsum += w * pen * nrm;
           let dp = (p - x0) - (q.xyz - pos[j].xyz);
           let dtan = dp - dot(dp, nrm) * nrm;

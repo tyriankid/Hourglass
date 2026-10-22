@@ -556,6 +556,68 @@ async function main() {
     (window as any).__result = { ok: true };
     return;
   }
+  if (mode === 'restpile') {
+    // 下泡摆好 min 分钟的锥形沙堆，沉降 settle 帧后逐帧测量：位移分布、休眠比例
+    const rp = defaultParams(rc, sandMassForSeconds(3600));
+    if (params.get('shock')) rp.shockK = Number(params.get('shock'));
+    if (params.get('iters')) rp.iterations = Number(params.get('iters'));
+    const sim = new SandSim(device, rp);
+    sim.seed(seedBulb(rc, sandMassForSeconds(minutes * 60), -1, 1, 9, 0.6));
+    const settleF = Number(params.get('settle') ?? 300);
+    const stepF = async () => {
+      const enc = device.createCommandEncoder();
+      sim.encodeFrame(enc, { wallDt: 1 / 60, substeps: 8, gLocal: [0, -G0, 0], omega: [0, 0, 0], alpha: [0, 0, 0], flow: true });
+      device.queue.submit([enc.finish()]);
+      sim.afterSubmit();
+      await sim.flush();
+    };
+    for (let f = 0; f < settleF; f++) {
+      await stepF();
+      if (f % 60 === 59) {
+        const st = await sim.readState();
+        let asleep = 0;
+        let alive = 0;
+        for (let i = 0; i < sim.p.clumpCap; i++) if (st.pos[i * 4 + 3] > 0) { alive++; if (st.rest[i * 4 + 3] < 0) asleep++; }
+        console.log(`[restpile] f=${f + 1} 休眠 ${asleep}/${alive}`);
+      }
+    }
+    for (let k = 0; k < 3; k++) {
+      const a = (await sim.readState()).pos;
+      await stepF();
+      const st = await sim.readState();
+      const sp: number[] = [];
+      let asleep = 0;
+      for (let i = 0; i < sim.p.clumpCap; i++) {
+        if (st.pos[i * 4 + 3] <= 0) continue;
+        if (st.rest[i * 4 + 3] < 0) asleep++;
+        sp.push(Math.hypot(st.pos[i * 4] - a[i * 4], st.pos[i * 4 + 1] - a[i * 4 + 1], st.pos[i * 4 + 2] - a[i * 4 + 2]) * 60000);
+      }
+      // 按"离沙面的深度"分层：每层里速度 > 1 mm/s 的比例、平均速度方向（竖直分量）
+      const rows: Array<{ v: number; y: number; r: number; vy: number }> = [];
+      for (let i = 0; i < sim.p.clumpCap; i++) {
+        if (st.pos[i * 4 + 3] <= 0) continue;
+        rows.push({ v: Math.hypot(st.pos[i * 4] - a[i * 4], st.pos[i * 4 + 1] - a[i * 4 + 1], st.pos[i * 4 + 2] - a[i * 4 + 2]) * 60000, y: st.pos[i * 4 + 1], r: Math.hypot(st.pos[i * 4], st.pos[i * 4 + 2]), vy: (st.pos[i * 4 + 1] - a[i * 4 + 1]) * 60000 });
+      }
+      // 沙面高度近似：同一离轴距离环带里的最高点
+      const ring = new Map<number, number>();
+      for (const r of rows) { const k = Math.floor(r.r / 0.003); ring.set(k, Math.max(ring.get(k) ?? -1, r.y)); }
+      const layers = new Map<number, { n: number; mv: number; vy: number }>();
+      for (const r of rows) {
+        const depth = (ring.get(Math.floor(r.r / 0.003))! - r.y) * 1000;
+        const k = Math.min(5, Math.floor(depth / 4));
+        const l = layers.get(k) ?? { n: 0, mv: 0, vy: 0 };
+        l.n++;
+        if (r.v > 1) { l.mv++; l.vy += r.vy; }
+        layers.set(k, l);
+      }
+      const desc = [...layers.entries()].sort((x, y) => x[0] - y[0]).map(([k, l]) => `${k * 4}-${k * 4 + 4}mm:${((l.mv / l.n) * 100).toFixed(0)}%动(vy ${(l.vy / Math.max(1, l.mv)).toFixed(2)})`).join('  ');
+      sp.sort((x, y) => x - y);
+      const q = (f: number) => +sp[Math.floor(f * (sp.length - 1))].toFixed(3);
+      console.log(`[restpile] 逐帧 mm/s p50 ${q(0.5)} p90 ${q(0.9)} p99 ${q(0.99)} max ${q(1)}  休眠 ${asleep}/${sp.length}\n   深度分层 ${desc}`);
+    }
+    (window as any).__result = { ok: true };
+    return;
+  }
   if (mode === 'neck') {
     // 瓶颈现场：沙在上泡，沉降 1 s 后开孔口流 3 s，列出离孔口最近的颗粒团
     const sp = defaultParams(rc, sandMassForSeconds(3600));
